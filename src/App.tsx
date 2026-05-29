@@ -68,7 +68,7 @@ function newId(prefix: string) {
 function defaultData(): LauncherData {
   return {
     version: 1,
-    categories: [{ id: "default", name: "甯哥敤", color: "#2f80ed", order: 0 }],
+    categories: [{ id: "default", name: "常用", color: "#2f80ed", order: 0 }],
     items: [],
     settings: { hotkey: "Ctrl+Space", closeToTray: true, autoStart: false, launchMode: "single" },
   };
@@ -622,7 +622,7 @@ export default function App() {
             type="button"
           >
             <Grid2X2 size={18} />
-            <span>鍏ㄩ儴</span>
+            <span>全部应用</span>
             <b>{data.items.length}</b>
           </button>
 
