@@ -40,6 +40,7 @@ import {
   chooseIcon,
   chooseTarget,
   extractIcon,
+  hideMainWindow,
   launchTarget,
   loadData,
   revealDataDir,
@@ -70,7 +71,14 @@ function defaultData(): LauncherData {
     version: 1,
     categories: [{ id: "default", name: "常用", color: "#2f80ed", order: 0 }],
     items: [],
-    settings: { hotkey: "Ctrl+Space", closeToTray: true, autoStart: false, launchMode: "single" },
+    settings: {
+      hotkey: "Ctrl+Space",
+      closeToTray: true,
+      autoStart: false,
+      autoHideAfterLaunch: true,
+      autoHideOnBlur: true,
+      launchMode: "single",
+    },
   };
 }
 
@@ -211,6 +219,24 @@ export default function App() {
       cleanup?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const appWindow = getCurrentWindow();
+    let cleanup: (() => void) | undefined;
+
+    appWindow
+      .onFocusChanged((event) => {
+        if (event.payload || !data.settings.autoHideOnBlur || draft || settingsOpen) return;
+        void hideMainWindow();
+      })
+      .then((unlisten) => {
+        cleanup = unlisten;
+      })
+      .catch((error) => setStatus(`窗口焦点监听失败：${String(error)}`));
+
+    return () => cleanup?.();
+  }, [data.settings.autoHideOnBlur, draft, settingsOpen]);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -576,20 +602,38 @@ export default function App() {
   async function runItem(item: LauncherItem) {
     try {
       await launchTarget(item.path, item.args, item.targetType);
+      if (data.settings.autoHideAfterLaunch) {
+        await hideMainWindow();
+      }
       setStatus(`已启动 ${item.name}`);
     } catch (error) {
       setStatus(`启动失败：${String(error)}`);
     }
   }
 
-  async function saveSettings(hotkey: string, closeToTray: boolean, autoStart: boolean, launchMode: LaunchMode) {
+  async function saveSettings(
+    hotkey: string,
+    closeToTray: boolean,
+    autoStart: boolean,
+    autoHideAfterLaunch: boolean,
+    autoHideOnBlur: boolean,
+    launchMode: LaunchMode,
+  ) {
     try {
       const nextHotkey = hotkey.trim() || "Ctrl+Space";
       await updateHotkey(nextHotkey);
       await updateStartup(autoStart);
       persist((current) => ({
         ...current,
-        settings: { ...current.settings, hotkey: nextHotkey, closeToTray, autoStart, launchMode },
+        settings: {
+          ...current.settings,
+          hotkey: nextHotkey,
+          closeToTray,
+          autoStart,
+          autoHideAfterLaunch,
+          autoHideOnBlur,
+          launchMode,
+        },
       }));
       setSettingsOpen(false);
       setStatus("设置已更新");
@@ -736,6 +780,8 @@ export default function App() {
           closeToTray={data.settings.closeToTray}
           hotkey={data.settings.hotkey}
           autoStart={data.settings.autoStart}
+          autoHideAfterLaunch={data.settings.autoHideAfterLaunch}
+          autoHideOnBlur={data.settings.autoHideOnBlur}
           launchMode={data.settings.launchMode}
           onAddCategory={addCategory}
           onClose={() => setSettingsOpen(false)}
@@ -925,6 +971,8 @@ function ItemModal({ categories, draft, onChange, onClose, onDelete, onPickIcon,
 
 interface SettingsModalProps {
   autoStart: boolean;
+  autoHideAfterLaunch: boolean;
+  autoHideOnBlur: boolean;
   categories: Category[];
   closeToTray: boolean;
   hotkey: string;
@@ -933,11 +981,20 @@ interface SettingsModalProps {
   onClose: () => void;
   onDeleteCategory: (id: string) => void;
   onReorderCategory: (activeId: string, overId: string) => void;
-  onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, launchMode: LaunchMode) => void;
+  onSubmit: (
+    hotkey: string,
+    closeToTray: boolean,
+    autoStart: boolean,
+    autoHideAfterLaunch: boolean,
+    autoHideOnBlur: boolean,
+    launchMode: LaunchMode,
+  ) => void;
 }
 
 function SettingsModal({
   autoStart,
+  autoHideAfterLaunch,
+  autoHideOnBlur,
   categories,
   closeToTray,
   hotkey,
@@ -951,6 +1008,8 @@ function SettingsModal({
   const [nextHotkey, setNextHotkey] = useState(hotkey);
   const [nextCloseToTray, setNextCloseToTray] = useState(closeToTray);
   const [nextAutoStart, setNextAutoStart] = useState(autoStart);
+  const [nextAutoHideAfterLaunch, setNextAutoHideAfterLaunch] = useState(autoHideAfterLaunch);
+  const [nextAutoHideOnBlur, setNextAutoHideOnBlur] = useState(autoHideOnBlur);
   const [nextLaunchMode, setNextLaunchMode] = useState<LaunchMode>(launchMode);
   const [nextCategory, setNextCategory] = useState("");
   const [capturingHotkey, setCapturingHotkey] = useState(false);
@@ -1009,6 +1068,14 @@ function SettingsModal({
             <input checked={nextCloseToTray} onChange={(event) => setNextCloseToTray(event.target.checked)} type="checkbox" />
             关闭窗口时最小化到托盘
           </label>
+          <label className="check-row">
+            <input checked={nextAutoHideAfterLaunch} onChange={(event) => setNextAutoHideAfterLaunch(event.target.checked)} type="checkbox" />
+            运行程序后自动关闭主窗口
+          </label>
+          <label className="check-row">
+            <input checked={nextAutoHideOnBlur} onChange={(event) => setNextAutoHideOnBlur(event.target.checked)} type="checkbox" />
+            失去焦点后关闭主窗口
+          </label>
           <label>
             <span>启动方式</span>
             <div className="segmented">
@@ -1061,7 +1128,22 @@ function SettingsModal({
         </div>
         <footer>
           <button className="ghost" onClick={onClose} type="button">取消</button>
-          <button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextLaunchMode)} type="button">保存</button>
+          <button
+            className="primary"
+            onClick={() =>
+              onSubmit(
+                nextHotkey.trim() || "Ctrl+Space",
+                nextCloseToTray,
+                nextAutoStart,
+                nextAutoHideAfterLaunch,
+                nextAutoHideOnBlur,
+                nextLaunchMode,
+              )
+            }
+            type="button"
+          >
+            保存
+          </button>
         </footer>
       </section>
     </div>

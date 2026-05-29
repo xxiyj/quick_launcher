@@ -31,6 +31,8 @@ export interface LauncherSettings {
   hotkey: string;
   closeToTray: boolean;
   autoStart: boolean;
+  autoHideAfterLaunch: boolean;
+  autoHideOnBlur: boolean;
   launchMode: LaunchMode;
   windowSize?: WindowSize;
 }

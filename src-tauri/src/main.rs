@@ -78,6 +78,10 @@ struct LauncherSettings {
     close_to_tray: bool,
     #[serde(default)]
     auto_start: bool,
+    #[serde(default = "default_true")]
+    auto_hide_after_launch: bool,
+    #[serde(default = "default_true")]
+    auto_hide_on_blur: bool,
     #[serde(default = "default_launch_mode")]
     launch_mode: LaunchMode,
     #[serde(default)]
@@ -93,6 +97,10 @@ enum LaunchMode {
 
 fn default_launch_mode() -> LaunchMode {
     LaunchMode::Single
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +200,7 @@ fn main() {
             update_hotkey,
             update_startup,
             show_main_window,
+            hide_main_window,
             reveal_data_dir,
             save_window_size
         ])
@@ -213,6 +222,8 @@ fn default_data() -> LauncherData {
             hotkey: "Ctrl+Space".into(),
             close_to_tray: true,
             auto_start: false,
+            auto_hide_after_launch: true,
+            auto_hide_on_blur: true,
             launch_mode: LaunchMode::Single,
             window_size: None,
         },
@@ -754,6 +765,14 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|error| error.to_string())?;
     }
     Ok(())
 }

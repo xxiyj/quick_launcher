@@ -20,7 +20,14 @@ export async function loadData(): Promise<DataEnvelope> {
           { id: "tools", name: "工具", color: "#27ae60", order: 1 },
         ],
         items: [],
-        settings: { hotkey: "Ctrl+Space", closeToTray: true, autoStart: false, launchMode: "single" },
+        settings: {
+          hotkey: "Ctrl+Space",
+          closeToTray: true,
+          autoStart: false,
+          autoHideAfterLaunch: true,
+          autoHideOnBlur: true,
+          launchMode: "single",
+        },
       },
     };
   }
@@ -77,6 +84,11 @@ export async function saveWindowSize(width: number, height: number): Promise<voi
 export async function showMainWindow(): Promise<void> {
   if (!isTauri) return;
   await invoke("show_main_window");
+}
+
+export async function hideMainWindow(): Promise<void> {
+  if (!isTauri) return;
+  await invoke("hide_main_window");
 }
 
 export async function revealDataDir(): Promise<void> {
