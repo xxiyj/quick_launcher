@@ -125,6 +125,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const resizeSaveTimer = useRef<number | undefined>(undefined);
+  const ignoreAutoHideUntil = useRef(0);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -228,6 +229,7 @@ export default function App() {
     appWindow
       .onFocusChanged((event) => {
         if (event.payload || !data.settings.autoHideOnBlur || draft || settingsOpen) return;
+        if (Date.now() < ignoreAutoHideUntil.current) return;
         void hideMainWindow();
       })
       .then((unlisten) => {
@@ -648,7 +650,12 @@ export default function App() {
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => event.preventDefault()}
     >
-      <WindowTitlebar subtitle={activeCategory?.name ?? "全部应用"} />
+      <WindowTitlebar
+        onTitlebarInteraction={() => {
+          ignoreAutoHideUntil.current = Date.now() + 1500;
+        }}
+        subtitle={activeCategory?.name ?? "全部应用"}
+      />
 
       <div className="main-layout">
         <aside className="sidebar">
@@ -814,6 +821,7 @@ interface ItemModalProps {
 }
 
 interface WindowTitlebarProps {
+  onTitlebarInteraction: () => void;
   subtitle: string;
 }
 
@@ -864,9 +872,10 @@ function SortableAppCard({ categoryName, disabled, item, launchMode, onEdit, onR
   );
 }
 
-function WindowTitlebar({ subtitle }: WindowTitlebarProps) {
+function WindowTitlebar({ onTitlebarInteraction, subtitle }: WindowTitlebarProps) {
   async function startDrag(event: ReactMouseEvent) {
     if (!("__TAURI_INTERNALS__" in window)) return;
+    onTitlebarInteraction();
     const appWindow = getCurrentWindow();
     if (event.detail > 1) {
       await appWindow.toggleMaximize();
