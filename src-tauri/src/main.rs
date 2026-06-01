@@ -38,10 +38,10 @@ use windows::{
         },
         UI::{
             Shell::{
-                IShellLinkW, SHGetFileInfoW, SHFILEINFOW, ShellLink, SHGFI_ICON, SHGFI_LARGEICON,
-                SLGP_UNCPRIORITY,
+                IShellLinkW, SHGetFileInfoW, SHFILEINFOW, ShellExecuteW, ShellLink, SHGFI_ICON,
+                SHGFI_LARGEICON, SLGP_UNCPRIORITY,
             },
-            WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO},
+            WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO, SW_SHOWNORMAL},
         },
     },
 };
@@ -642,6 +642,7 @@ fn hicon_to_png(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(not(windows))]
 fn split_args(args: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -667,6 +668,40 @@ fn split_args(args: &str) -> Vec<String> {
 
 #[tauri::command]
 fn launch_target(path: String, args: String, target_type: TargetType) -> Result<(), String> {
+    launch_target_native(path, args, target_type)
+}
+
+#[cfg(windows)]
+fn launch_target_native(path: String, args: String, target_type: TargetType) -> Result<(), String> {
+    let file = wide_path(&path);
+    let params = if matches!(target_type, TargetType::Program) && !args.trim().is_empty() {
+        Some(wide_path(args.trim()))
+    } else {
+        None
+    };
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            None,
+            PCWSTR(file.as_ptr()),
+            params
+                .as_ref()
+                .map(|value| PCWSTR(value.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code <= 32 {
+        Err(format!("ShellExecute failed with code {code}"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_target_native(path: String, args: String, target_type: TargetType) -> Result<(), String> {
     match target_type {
         TargetType::Folder => {
             Command::new("explorer")
