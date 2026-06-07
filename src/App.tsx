@@ -276,8 +276,9 @@ export default function App() {
   }, [draft, query, settingsOpen]);
 
   const visibleItems = useMemo(() => {
+    const searchAllCategories = Boolean(query.trim());
     return [...data.items]
-      .filter((item) => selectedCategory === "all" || item.categoryId === selectedCategory)
+      .filter((item) => searchAllCategories || selectedCategory === "all" || item.categoryId === selectedCategory)
       .filter((item) => matchesSearch(item.name, item.searchKey, query))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN"));
   }, [data.items, query, selectedCategory]);
@@ -701,7 +702,7 @@ export default function App() {
         <section className="content">
           <header className="topbar">
             <div>
-              <p>{activeCategory?.name ?? "全部应用"}</p>
+              <p>{query ? "全部应用" : activeCategory?.name ?? "全部应用"}</p>
               <h1>{query ? `搜索：${query}` : "快速启动"}</h1>
             </div>
             <div className="actions">
