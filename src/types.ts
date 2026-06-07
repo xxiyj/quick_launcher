@@ -23,6 +23,7 @@ export interface LauncherItem {
   iconPath?: string;
   searchKey: string;
   order: number;
+  launchCount?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -33,6 +34,7 @@ export interface LauncherSettings {
   autoStart: boolean;
   autoHideAfterLaunch: boolean;
   autoHideOnBlur: boolean;
+  autoSortByLaunchCount: boolean;
   launchMode: LaunchMode;
   windowSize?: WindowSize;
 }

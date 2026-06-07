@@ -16,7 +16,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     PhysicalSize,
-    tray::TrayIconBuilder,
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -67,6 +67,8 @@ struct LauncherItem {
     icon_path: Option<String>,
     search_key: String,
     order: u32,
+    #[serde(default)]
+    launch_count: u32,
     created_at: String,
     updated_at: String,
 }
@@ -82,6 +84,8 @@ struct LauncherSettings {
     auto_hide_after_launch: bool,
     #[serde(default = "default_true")]
     auto_hide_on_blur: bool,
+    #[serde(default = "default_true")]
+    auto_sort_by_launch_count: bool,
     #[serde(default = "default_launch_mode")]
     launch_mode: LaunchMode,
     #[serde(default)]
@@ -224,6 +228,7 @@ fn default_data() -> LauncherData {
             auto_start: false,
             auto_hide_after_launch: true,
             auto_hide_on_blur: true,
+            auto_sort_by_launch_count: true,
             launch_mode: LaunchMode::Single,
             window_size: None,
         },
@@ -294,6 +299,13 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Quick Launcher")
         .menu(&menu)
         .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick { button, .. } = event {
+                if button == MouseButton::Left {
+                    show_main_window_unchecked(tray.app_handle());
+                }
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" | "settings" => {
                 if let Some(window) = app.get_webview_window("main") {
@@ -797,11 +809,16 @@ fn set_startup_enabled(enabled: bool) -> Result<(), String> {
 
 #[tauri::command]
 fn show_main_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-    }
+    show_main_window_unchecked(&app);
     Ok(())
+}
+
+fn show_main_window_unchecked(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 #[tauri::command]

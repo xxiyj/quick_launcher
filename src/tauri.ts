@@ -26,6 +26,7 @@ export async function loadData(): Promise<DataEnvelope> {
           autoStart: false,
           autoHideAfterLaunch: true,
           autoHideOnBlur: true,
+          autoSortByLaunchCount: true,
           launchMode: "single",
         },
       },

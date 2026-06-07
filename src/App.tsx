@@ -77,6 +77,7 @@ function defaultData(): LauncherData {
       autoStart: false,
       autoHideAfterLaunch: true,
       autoHideOnBlur: true,
+      autoSortByLaunchCount: true,
       launchMode: "single",
     },
   };
@@ -126,6 +127,7 @@ export default function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const resizeSaveTimer = useRef<number | undefined>(undefined);
   const ignoreAutoHideUntil = useRef(0);
+  const lastSavedWindowSize = useRef<{ width: number; height: number } | undefined>(undefined);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -143,6 +145,7 @@ export default function App() {
           ...envelope.data,
           settings: { ...defaultData().settings, ...envelope.data.settings },
         });
+        lastSavedWindowSize.current = envelope.data.settings.windowSize;
         setDataPath(envelope.dataPath);
         setStatus(envelope.writable ? "已准备好" : envelope.message ?? "数据目录不可写");
         setLoaded(true);
@@ -199,10 +202,13 @@ export default function App() {
 
     appWindow
       .onResized(async (event) => {
-        if (await appWindow.isMaximized()) return;
+        if (await appWindow.isMaximized() || await appWindow.isMinimized()) return;
         window.clearTimeout(resizeSaveTimer.current);
         resizeSaveTimer.current = window.setTimeout(() => {
           const windowSize = { width: event.payload.width, height: event.payload.height };
+          const saved = lastSavedWindowSize.current;
+          if (saved?.width === windowSize.width && saved.height === windowSize.height) return;
+          lastSavedWindowSize.current = windowSize;
           setData((current) => ({
             ...current,
             settings: { ...current.settings, windowSize },
@@ -280,8 +286,13 @@ export default function App() {
     return [...data.items]
       .filter((item) => searchAllCategories || selectedCategory === "all" || item.categoryId === selectedCategory)
       .filter((item) => matchesSearch(item.name, item.searchKey, query))
-      .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN"));
-  }, [data.items, query, selectedCategory]);
+      .sort((a, b) => {
+        if (data.settings.autoSortByLaunchCount) {
+          return (b.launchCount ?? 0) - (a.launchCount ?? 0) || a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN");
+        }
+        return a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN");
+      });
+  }, [data.items, data.settings.autoSortByLaunchCount, query, selectedCategory]);
 
   const activeCategory = categories.find((category) => category.id === selectedCategory);
   const categoryCounts = useMemo(() => {
@@ -308,7 +319,7 @@ export default function App() {
   }
 
   function handleItemDragEnd(event: DragEndEvent) {
-    if (query.trim()) return;
+    if (query.trim() || data.settings.autoSortByLaunchCount) return;
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : "";
     if (!overId || activeId === overId) return;
@@ -468,6 +479,7 @@ export default function App() {
         iconPath: undefined,
         searchKey: buildSearchKey(name, path),
         order: data.items.length + additions.length,
+        launchCount: 0,
         createdAt: now,
         updatedAt: now,
       });
@@ -582,6 +594,7 @@ export default function App() {
       iconPath: draft.iconPath,
       searchKey: buildSearchKey(draft.name, `${draft.path} ${draft.args}`),
       order: draft.id ? data.items.find((value) => value.id === draft.id)?.order ?? 0 : data.items.length,
+      launchCount: data.items.find((value) => value.id === draft.id)?.launchCount ?? 0,
       createdAt: data.items.find((value) => value.id === draft.id)?.createdAt ?? now,
       updatedAt: now,
     };
@@ -605,6 +618,14 @@ export default function App() {
   async function runItem(item: LauncherItem) {
     try {
       await launchTarget(item.path, item.args, item.targetType);
+      persist((current) => ({
+        ...current,
+        items: current.items.map((value) =>
+          value.id === item.id
+            ? { ...value, launchCount: (value.launchCount ?? 0) + 1, updatedAt: new Date().toISOString() }
+            : value,
+        ),
+      }));
       if (data.settings.autoHideAfterLaunch) {
         await hideMainWindow();
       }
@@ -620,6 +641,7 @@ export default function App() {
     autoStart: boolean,
     autoHideAfterLaunch: boolean,
     autoHideOnBlur: boolean,
+    autoSortByLaunchCount: boolean,
     launchMode: LaunchMode,
   ) {
     try {
@@ -635,6 +657,7 @@ export default function App() {
           autoStart,
           autoHideAfterLaunch,
           autoHideOnBlur,
+          autoSortByLaunchCount,
           launchMode,
         },
       }));
@@ -729,7 +752,7 @@ export default function App() {
                 {visibleItems.map((item) => (
                   <SortableAppCard
                     categoryName={categories.find((category) => category.id === item.categoryId)?.name ?? "未分类"}
-                    disabled={Boolean(query.trim())}
+                    disabled={Boolean(query.trim()) || data.settings.autoSortByLaunchCount}
                     item={item}
                     key={item.id}
                     launchMode={data.settings.launchMode}
@@ -790,6 +813,7 @@ export default function App() {
           autoStart={data.settings.autoStart}
           autoHideAfterLaunch={data.settings.autoHideAfterLaunch}
           autoHideOnBlur={data.settings.autoHideOnBlur}
+          autoSortByLaunchCount={data.settings.autoSortByLaunchCount}
           launchMode={data.settings.launchMode}
           onAddCategory={addCategory}
           onClose={() => setSettingsOpen(false)}
@@ -983,6 +1007,7 @@ interface SettingsModalProps {
   autoStart: boolean;
   autoHideAfterLaunch: boolean;
   autoHideOnBlur: boolean;
+  autoSortByLaunchCount: boolean;
   categories: Category[];
   closeToTray: boolean;
   hotkey: string;
@@ -997,6 +1022,7 @@ interface SettingsModalProps {
     autoStart: boolean,
     autoHideAfterLaunch: boolean,
     autoHideOnBlur: boolean,
+    autoSortByLaunchCount: boolean,
     launchMode: LaunchMode,
   ) => void;
 }
@@ -1005,6 +1031,7 @@ function SettingsModal({
   autoStart,
   autoHideAfterLaunch,
   autoHideOnBlur,
+  autoSortByLaunchCount,
   categories,
   closeToTray,
   hotkey,
@@ -1020,6 +1047,7 @@ function SettingsModal({
   const [nextAutoStart, setNextAutoStart] = useState(autoStart);
   const [nextAutoHideAfterLaunch, setNextAutoHideAfterLaunch] = useState(autoHideAfterLaunch);
   const [nextAutoHideOnBlur, setNextAutoHideOnBlur] = useState(autoHideOnBlur);
+  const [nextAutoSortByLaunchCount, setNextAutoSortByLaunchCount] = useState(autoSortByLaunchCount);
   const [nextLaunchMode, setNextLaunchMode] = useState<LaunchMode>(launchMode);
   const [nextCategory, setNextCategory] = useState("");
   const [capturingHotkey, setCapturingHotkey] = useState(false);
@@ -1086,6 +1114,10 @@ function SettingsModal({
             <input checked={nextAutoHideOnBlur} onChange={(event) => setNextAutoHideOnBlur(event.target.checked)} type="checkbox" />
             失去焦点后关闭主窗口
           </label>
+          <label className="check-row">
+            <input checked={nextAutoSortByLaunchCount} onChange={(event) => setNextAutoSortByLaunchCount(event.target.checked)} type="checkbox" />
+            按打开次数自动排序
+          </label>
           <label>
             <span>启动方式</span>
             <div className="segmented">
@@ -1147,6 +1179,7 @@ function SettingsModal({
                 nextAutoStart,
                 nextAutoHideAfterLaunch,
                 nextAutoHideOnBlur,
+                nextAutoSortByLaunchCount,
                 nextLaunchMode,
               )
             }
