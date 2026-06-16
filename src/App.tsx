@@ -722,13 +722,6 @@ export default function App() {
         <section className="content">
           <header className="topbar">
             <div className="topbar-left">
-              <div className="content-brand">
-                <div className="brand-mark"><img alt="" src="/app-icon.png" /></div>
-                <div className="brand-copy">
-                  <strong>Quick Launcher</strong>
-                  <span>桌面快速启动器</span>
-                </div>
-              </div>
               <div className="view-title">
                 <p>{query ? "全部应用" : activeCategory?.name ?? "全部应用"}</p>
                 <h1>{query ? `搜索：${query}` : "快速启动"}</h1>
@@ -928,7 +921,15 @@ function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
 
   return (
     <header className="window-titlebar">
-      <div className="titlebar-drag" onMouseDown={(event) => void startDrag(event)} />
+      <div className="titlebar-drag" onMouseDown={(event) => void startDrag(event)}>
+        <div className="titlebar-brand">
+          <div className="brand-mark"><img alt="" src="/app-icon.png" /></div>
+          <div className="brand-copy">
+            <strong>Quick Launcher</strong>
+            <span>桌面快速启动器</span>
+          </div>
+        </div>
+      </div>
       <div className="window-controls">
         <button onClick={() => void control("minimize")} title="最小化" type="button">
           <Minus size={16} />
