@@ -721,10 +721,10 @@ export default function App() {
 
         <section className="content">
           <header className="topbar">
-            <div>
+            <div className="topbar-left">
               <div className="content-brand">
                 <div className="brand-mark"><img alt="" src="/app-icon.png" /></div>
-                <div>
+                <div className="brand-copy">
                   <strong>Quick Launcher</strong>
                   <span>桌面快速启动器</span>
                 </div>

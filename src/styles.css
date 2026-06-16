@@ -106,12 +106,19 @@ button {
 .content-brand {
   display: flex;
   align-items: center;
+  align-self: flex-start;
   gap: 12px;
-  margin-bottom: 14px;
+  width: 250px;
+  min-height: 66px;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: transparent;
 }
 
 .brand-mark {
   display: grid;
+  flex: 0 0 auto;
   width: 42px;
   height: 42px;
   place-items: center;
@@ -127,12 +134,25 @@ button {
   height: 100%;
 }
 
-.content-brand strong,
-.content-brand span {
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-copy strong,
+.brand-copy span {
   display: block;
 }
 
-.content-brand span {
+.brand-copy strong {
+  overflow: hidden;
+  color: #142033;
+  font-size: 16px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-copy span {
   margin-top: 2px;
   color: #68758a;
   font-size: 12px;
@@ -242,6 +262,12 @@ button {
   justify-content: space-between;
   gap: 24px;
   margin-bottom: 18px;
+}
+
+.topbar-left {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
 }
 
 .topbar p,
