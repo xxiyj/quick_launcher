@@ -45,7 +45,6 @@ button {
   grid-template-columns: 1fr auto;
   align-items: center;
   height: 42px;
-  border-bottom: 1px solid rgba(24, 33, 51, 0.07);
   background: rgba(250, 252, 255, 0.86);
   backdrop-filter: blur(16px);
   user-select: none;
@@ -54,44 +53,8 @@ button {
 .titlebar-drag {
   display: flex;
   align-items: center;
-  gap: 10px;
   height: 100%;
   min-width: 0;
-  padding: 0 12px;
-}
-
-.titlebar-mark {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 6px;
-  overflow: hidden;
-  background: #182133;
-}
-
-.titlebar-mark img {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.titlebar-drag strong,
-.titlebar-drag span {
-  display: block;
-}
-
-.titlebar-drag strong {
-  color: #172033;
-  font-size: 13px;
-  line-height: 1.1;
-}
-
-.titlebar-drag span {
-  margin-top: 1px;
-  color: #6c778b;
-  font-size: 11px;
 }
 
 .window-controls {
@@ -134,17 +97,17 @@ button {
   flex-direction: column;
   gap: 10px;
   min-height: 0;
-  padding: 18px 14px 14px;
+  padding: 20px 14px 14px;
   border-right: 1px solid rgba(24, 33, 51, 0.08);
   background: rgba(250, 252, 255, 0.78);
   backdrop-filter: blur(18px);
 }
 
-.brand {
+.content-brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 
 .brand-mark {
@@ -164,12 +127,12 @@ button {
   height: 100%;
 }
 
-.brand strong,
-.brand span {
+.content-brand strong,
+.content-brand span {
   display: block;
 }
 
-.brand span {
+.content-brand span {
   margin-top: 2px;
   color: #68758a;
   font-size: 12px;
@@ -278,12 +241,16 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
 .topbar p,
 .topbar h1 {
   margin: 0;
+}
+
+.view-title {
+  margin-top: 2px;
 }
 
 .topbar p {

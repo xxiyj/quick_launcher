@@ -307,6 +307,12 @@ export default function App() {
     return selectedCategory === "all" ? categories[0]?.id ?? "default" : selectedCategory;
   }
 
+  function selectCategory(id: string) {
+    setQuery("");
+    setSelectedCategory(id);
+    requestAnimationFrame(() => searchInputRef.current?.focus());
+  }
+
   function persist(updater: (value: LauncherData) => LauncherData) {
     setData((current) => updater(current));
   }
@@ -506,7 +512,7 @@ export default function App() {
       order: data.categories.length,
     };
     persist((current) => ({ ...current, categories: [...current.categories, category] }));
-    setSelectedCategory(category.id);
+    selectCategory(category.id);
   }
 
   function deleteCategory(id: string) {
@@ -522,7 +528,7 @@ export default function App() {
         item.categoryId === id ? { ...item, categoryId: fallback, updatedAt: new Date().toISOString() } : item,
       ),
     }));
-    setSelectedCategory("all");
+    selectCategory("all");
   }
 
   async function pickTarget(targetType: TargetType) {
@@ -678,22 +684,13 @@ export default function App() {
         onTitlebarInteraction={() => {
           ignoreAutoHideUntil.current = Date.now() + 1500;
         }}
-        subtitle={activeCategory?.name ?? "全部应用"}
       />
 
       <div className="main-layout">
         <aside className="sidebar">
-          <div className="brand">
-            <div className="brand-mark"><img alt="" src="/app-icon.png" /></div>
-            <div>
-              <strong>Quick Launcher</strong>
-              <span>桌面快速启动器</span>
-            </div>
-          </div>
-
           <button
             className={`category ${selectedCategory === "all" ? "active" : ""}`}
-            onClick={() => setSelectedCategory("all")}
+            onClick={() => selectCategory("all")}
             type="button"
           >
             <Grid2X2 size={18} />
@@ -706,7 +703,7 @@ export default function App() {
               <button
                 className={`category ${selectedCategory === category.id ? "active" : ""}`}
                 key={category.id}
-                onClick={() => setSelectedCategory(category.id)}
+                onClick={() => selectCategory(category.id)}
                 type="button"
               >
                 <i style={{ background: category.color }} />
@@ -725,8 +722,17 @@ export default function App() {
         <section className="content">
           <header className="topbar">
             <div>
-              <p>{query ? "全部应用" : activeCategory?.name ?? "全部应用"}</p>
-              <h1>{query ? `搜索：${query}` : "快速启动"}</h1>
+              <div className="content-brand">
+                <div className="brand-mark"><img alt="" src="/app-icon.png" /></div>
+                <div>
+                  <strong>Quick Launcher</strong>
+                  <span>桌面快速启动器</span>
+                </div>
+              </div>
+              <div className="view-title">
+                <p>{query ? "全部应用" : activeCategory?.name ?? "全部应用"}</p>
+                <h1>{query ? `搜索：${query}` : "快速启动"}</h1>
+              </div>
             </div>
             <div className="actions">
               <label className="search">
@@ -847,7 +853,6 @@ interface ItemModalProps {
 
 interface WindowTitlebarProps {
   onTitlebarInteraction: () => void;
-  subtitle: string;
 }
 
 interface SortableAppCardProps {
@@ -897,7 +902,7 @@ function SortableAppCard({ categoryName, disabled, item, launchMode, onEdit, onR
   );
 }
 
-function WindowTitlebar({ onTitlebarInteraction, subtitle }: WindowTitlebarProps) {
+function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
   async function startDrag(event: ReactMouseEvent) {
     if (!("__TAURI_INTERNALS__" in window)) return;
     onTitlebarInteraction();
@@ -923,13 +928,7 @@ function WindowTitlebar({ onTitlebarInteraction, subtitle }: WindowTitlebarProps
 
   return (
     <header className="window-titlebar">
-      <div className="titlebar-drag" onMouseDown={(event) => void startDrag(event)}>
-        <div className="titlebar-mark"><img alt="" src="/app-icon.png" /></div>
-        <div>
-          <strong>Quick Launcher</strong>
-          <span>{subtitle}</span>
-        </div>
-      </div>
+      <div className="titlebar-drag" onMouseDown={(event) => void startDrag(event)} />
       <div className="window-controls">
         <button onClick={() => void control("minimize")} title="最小化" type="button">
           <Minus size={16} />
