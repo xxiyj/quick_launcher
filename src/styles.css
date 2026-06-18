@@ -44,6 +44,7 @@ button {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;
+  position: relative;
   height: 64px;
   background: rgba(250, 252, 255, 0.86);
   backdrop-filter: blur(16px);
@@ -68,13 +69,17 @@ button {
 
 .window-controls {
   display: flex;
-  align-items: stretch;
-  height: 100%;
+  position: absolute;
+  top: 0;
+  right: 0;
+  align-items: flex-start;
+  height: 39px;
 }
 
 .window-controls button {
   display: grid;
-  width: 46px;
+  width: 43px;
+  height: 39px;
   place-items: center;
   color: #58647a;
   background: transparent;
@@ -343,6 +348,12 @@ button {
   color: white;
   background: #182133;
   box-shadow: 0 10px 20px rgba(24, 33, 51, 0.15);
+}
+
+.icon-primary {
+  min-width: 44px;
+  width: 44px;
+  padding: 0;
 }
 
 .ghost,

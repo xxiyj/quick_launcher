@@ -738,9 +738,13 @@ export default function App() {
                   value={query}
                 />
               </label>
-              <button className="primary" onClick={() => setDraft({ ...emptyDraft, categoryId: categories[0]?.id ?? "default" })} type="button">
+              <button
+                className="primary icon-primary"
+                onClick={() => setDraft({ ...emptyDraft, categoryId: categories[0]?.id ?? "default" })}
+                title="添加"
+                type="button"
+              >
                 <Plus size={18} />
-                添加
               </button>
             </div>
           </header>
