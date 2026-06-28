@@ -87,9 +87,9 @@ export async function showMainWindow(): Promise<void> {
   await invoke("show_main_window");
 }
 
-export async function hideMainWindow(): Promise<void> {
+export async function hideMainWindow(reason?: "blur" | "launch"): Promise<void> {
   if (!isTauri) return;
-  await invoke("hide_main_window");
+  await invoke("hide_main_window", { reason });
 }
 
 export async function revealDataDir(): Promise<void> {

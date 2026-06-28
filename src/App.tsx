@@ -236,7 +236,7 @@ export default function App() {
       .onFocusChanged((event) => {
         if (event.payload || !data.settings.autoHideOnBlur || draft || settingsOpen) return;
         if (Date.now() < ignoreAutoHideUntil.current) return;
-        void hideMainWindow();
+        void hideMainWindow("blur");
       })
       .then((unlisten) => {
         cleanup = unlisten;
@@ -380,7 +380,7 @@ export default function App() {
 
   async function hydrateDraftFromPath(originalPath: string) {
     try {
-      setStatus("姝ｅ湪瑙ｆ瀽鐩爣...");
+      setStatus("正在解析目标...");
       const imported = await importTarget(originalPath);
       const placeholderName = inferName(originalPath);
       setDraft((current) => {
@@ -492,7 +492,7 @@ export default function App() {
     }
 
     if (additions.length === 0) {
-      setStatus("鎷栧叆鐨勭洰鏍囧凡瀛樺湪");
+      setStatus("拖入的目标已存在");
       return;
     }
 
@@ -632,8 +632,9 @@ export default function App() {
             : value,
         ),
       }));
+      setQuery("");
       if (data.settings.autoHideAfterLaunch) {
-        await hideMainWindow();
+        await hideMainWindow("launch");
       }
       setStatus(`已启动 ${item.name}`);
     } catch (error) {
@@ -893,7 +894,7 @@ function SortableAppCard({ categoryName, disabled, item, launchMode, onEdit, onR
         </span>
       </button>
       <div className="card-tools">
-        <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title="缂栬緫" type="button"><Edit3 size={16} /></button>
+        <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title="编辑" type="button"><Edit3 size={16} /></button>
       </div>
     </article>
   );
