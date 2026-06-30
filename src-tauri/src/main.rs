@@ -9,6 +9,12 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+use std::{
+    ffi::{OsStr, OsString},
+    mem::size_of,
+    os::windows::ffi::{OsStrExt, OsStringExt},
+};
 use tauri::{
     menu::{Menu, MenuItem},
     PhysicalSize,
@@ -17,7 +23,30 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg(windows)]
-use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+use windows::{
+    core::{Interface, PCWSTR},
+    Win32::{
+        Graphics::Gdi::{
+            DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        },
+        System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
+        },
+        System::Registry::{
+            RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER,
+            KEY_SET_VALUE, REG_SZ,
+        },
+        UI::{
+            Shell::{
+                IShellLinkW, SHGetFileInfoW, SHFILEINFOW, ShellExecuteW, ShellLink, SHGFI_ICON,
+                SHGFI_LARGEICON, SLGP_UNCPRIORITY,
+            },
+            WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO, SW_SHOWNORMAL},
+        },
+    },
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -405,6 +434,15 @@ fn is_shortcut_path(path: &str) -> bool {
     lower.ends_with(".lnk") || lower.ends_with(".link")
 }
 
+fn sanitize_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn infer_target_type(path: &str) -> TargetType {
     if Path::new(path).is_dir() {
         TargetType::Folder
@@ -417,11 +455,96 @@ fn infer_target_type(path: &str) -> TargetType {
 
 #[tauri::command]
 fn resolve_target(path: String) -> Result<ResolvedTarget, String> {
+    let path = sanitize_path(&path);
+    if !is_shortcut_path(&path) {
+        return Ok(ResolvedTarget {
+            target_type: infer_target_type(&path),
+            path,
+            args: String::new(),
+        });
+    }
+
+    let (resolved_path, args) = resolve_shortcut_native(&path)?;
     Ok(ResolvedTarget {
-        target_type: infer_target_type(&path),
-        path,
-        args: String::new(),
+        target_type: infer_target_type(&resolved_path),
+        path: resolved_path,
+        args,
     })
+}
+
+#[cfg(not(windows))]
+fn resolve_shortcut_native(_path: &str) -> Result<(String, String), String> {
+    Err("Shortcut resolution is only available on Windows".into())
+}
+
+#[cfg(windows)]
+fn resolve_shortcut_native(path: &str) -> Result<(String, String), String> {
+    resolve_shortcut_shell_link(path).or_else(|_| resolve_shortcut_wscript(path))
+}
+
+#[cfg(windows)]
+fn resolve_shortcut_shell_link(path: &str) -> Result<(String, String), String> {
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| {
+            let shell_link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|error| error.to_string())?;
+            let persist_file: IPersistFile = shell_link.cast().map_err(|error| error.to_string())?;
+            let shortcut_path = wide_path(path);
+            persist_file
+                .Load(PCWSTR(shortcut_path.as_ptr()), STGM_READ)
+                .map_err(|error| error.to_string())?;
+
+            let mut target = vec![0u16; 32768];
+            shell_link
+                .GetPath(&mut target, std::ptr::null_mut(), SLGP_UNCPRIORITY.0 as u32)
+                .map_err(|error| error.to_string())?;
+
+            let mut args = vec![0u16; 4096];
+            shell_link
+                .GetArguments(&mut args)
+                .map_err(|error| error.to_string())?;
+
+            let resolved_path = wide_buffer_to_string(&target);
+            if resolved_path.trim().is_empty() {
+                Err("Shortcut target is empty".into())
+            } else {
+                Ok((resolved_path, wide_buffer_to_string(&args)))
+            }
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+fn resolve_shortcut_wscript(path: &str) -> Result<(String, String), String> {
+    let escaped_path = path.replace('\'', "''");
+    let script = format!(
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{escaped_path}'); [Console]::OutputEncoding=[Text.Encoding]::UTF8; Write-Output $s.TargetPath; Write-Output $s.Arguments"
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let resolved_path = lines.next().unwrap_or_default().trim().to_string();
+    let args = lines.next().unwrap_or_default().trim().to_string();
+
+    if resolved_path.is_empty() {
+        Err("Shortcut target is empty".into())
+    } else {
+        Ok((resolved_path, args))
+    }
 }
 
 #[tauri::command]
@@ -437,12 +560,14 @@ fn choose_icon() -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn extract_icon(app: AppHandle, path: String, item_id: String) -> Result<Option<String>, String> {
+    let path = sanitize_path(&path);
     match extract_icon_native(&app, &path, &item_id) {
         Ok(icon_path) => Ok(Some(icon_path)),
         Err(_) => Ok(None),
     }
 }
 
+#[cfg(not(windows))]
 fn split_args(args: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -468,42 +593,212 @@ fn split_args(args: &str) -> Vec<String> {
 
 #[cfg(windows)]
 fn extract_icon_native(_app: &AppHandle, _path: &str, _item_id: &str) -> Result<String, String> {
-    Err("Native icon extraction is unavailable in this build".into())
+    let data_path = state_path(_app);
+    let dir = icons_dir(&data_path);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let output = dir.join(format!("{_item_id}.png"));
+
+    let icon = file_icon(_path)?;
+    let result = hicon_to_png(icon, &output);
+    unsafe {
+        let _ = DestroyIcon(icon);
+    }
+    result?;
+
+    if output.exists() {
+        Ok(output.to_string_lossy().to_string())
+    } else {
+        Err("Icon extraction did not create an output file".into())
+    }
 }
 
 #[cfg(not(windows))]
 fn extract_icon_native(_app: &AppHandle, _path: &str, _item_id: &str) -> Result<String, String> {
-    Err("Native icon extraction is unavailable on this platform".into())
+    Err("Native icon extraction is only available on Windows".into())
+}
+
+#[cfg(windows)]
+fn wide_path(path: &str) -> Vec<u16> {
+    OsStr::new(path).encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn wide_buffer_to_string(buffer: &[u16]) -> String {
+    let len = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    OsString::from_wide(&buffer[..len])
+        .to_string_lossy()
+        .to_string()
+}
+
+#[cfg(windows)]
+fn file_icon(path: &str) -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, String> {
+    let wide = wide_path(path);
+    let mut info = SHFILEINFOW::default();
+    let result = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+
+    if result == 0 || info.hIcon.is_invalid() {
+        Err("No icon was returned for this file".into())
+    } else {
+        Ok(info.hIcon)
+    }
+}
+
+#[cfg(windows)]
+fn hicon_to_png(
+    icon: windows::Win32::UI::WindowsAndMessaging::HICON,
+    output: &Path,
+) -> Result<(), String> {
+    let mut icon_info = ICONINFO::default();
+    unsafe {
+        GetIconInfo(icon, &mut icon_info).map_err(|error| error.to_string())?;
+    }
+
+    let bitmap_handle = if !icon_info.hbmColor.is_invalid() {
+        icon_info.hbmColor
+    } else {
+        icon_info.hbmMask
+    };
+
+    let mut bitmap = BITMAP::default();
+    let object_size = unsafe {
+        GetObjectW(
+            bitmap_handle.into(),
+            size_of::<BITMAP>() as i32,
+            Some(&mut bitmap as *mut _ as *mut _),
+        )
+    };
+    if object_size == 0 {
+        unsafe {
+            let _ = DeleteObject(icon_info.hbmColor.into());
+            let _ = DeleteObject(icon_info.hbmMask.into());
+        }
+        return Err("Unable to inspect icon bitmap".into());
+    }
+
+    let width = bitmap.bmWidth as u32;
+    let height = if icon_info.hbmColor.is_invalid() {
+        (bitmap.bmHeight / 2) as u32
+    } else {
+        bitmap.bmHeight as u32
+    };
+
+    if width == 0 || height == 0 {
+        unsafe {
+            let _ = DeleteObject(icon_info.hbmColor.into());
+            let _ = DeleteObject(icon_info.hbmMask.into());
+        }
+        return Err("Icon bitmap has no size".into());
+    }
+
+    let mut bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bgra = vec![0u8; (width * height * 4) as usize];
+    let dc = unsafe { GetDC(None) };
+    if dc.is_invalid() {
+        unsafe {
+            let _ = DeleteObject(icon_info.hbmColor.into());
+            let _ = DeleteObject(icon_info.hbmMask.into());
+        }
+        return Err("Unable to acquire a device context".into());
+    }
+
+    let lines = unsafe {
+        GetDIBits(
+            dc,
+            bitmap_handle,
+            0,
+            height,
+            Some(bgra.as_mut_ptr() as *mut _),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe {
+        let _ = ReleaseDC(None, dc);
+        let _ = DeleteObject(icon_info.hbmColor.into());
+        let _ = DeleteObject(icon_info.hbmMask.into());
+    }
+
+    if lines == 0 {
+        return Err("Unable to read icon pixels".into());
+    }
+
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    if !bgra.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+    }
+
+    image::RgbaImage::from_raw(width, height, bgra)
+        .ok_or_else(|| "Unable to build icon image".to_string())?
+        .save(output)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn launch_target(path: String, args: String, target_type: TargetType) -> Result<(), String> {
-    launch_target_native(path, args, target_type)
+    launch_target_native(sanitize_path(&path), args, target_type)
 }
 
 #[cfg(windows)]
 fn launch_target_native(path: String, args: String, target_type: TargetType) -> Result<(), String> {
-    match target_type {
-        TargetType::Folder => {
-            Command::new("explorer")
-                .arg(path)
-                .spawn()
-                .map_err(|error| error.to_string())?;
-        }
-        TargetType::Program => {
-            Command::new(path)
-                .args(split_args(&args))
-                .spawn()
-                .map_err(|error| error.to_string())?;
-        }
-        TargetType::Shortcut => {
-            Command::new("cmd")
-                .args(["/C", "start", "", &path])
-                .spawn()
-                .map_err(|error| error.to_string())?;
-        }
+    let file = wide_path(&path);
+    let params = if matches!(target_type, TargetType::Program) && !args.trim().is_empty() {
+        Some(wide_path(args.trim()))
+    } else {
+        None
+    };
+    let working_dir = if matches!(target_type, TargetType::Program) {
+        Path::new(&path)
+            .parent()
+            .map(|dir| wide_path(&dir.to_string_lossy()))
+    } else {
+        None
+    };
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            None,
+            PCWSTR(file.as_ptr()),
+            params
+                .as_ref()
+                .map(|value| PCWSTR(value.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
+            working_dir
+                .as_ref()
+                .map(|value| PCWSTR(value.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code <= 32 {
+        Err(format!("ShellExecute failed with code {code}"))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -559,23 +854,46 @@ fn set_startup_enabled(_enabled: bool) -> Result<(), String> {
 
 #[cfg(windows)]
 fn set_startup_enabled(enabled: bool) -> Result<(), String> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu
-        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
-        .map_err(|error| error.to_string())?;
+    let subkey = wide_path("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let value_name = wide_path("Quick Launcher");
+    let mut key = windows::Win32::System::Registry::HKEY::default();
+    unsafe {
+        let open_result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            Some(0),
+            KEY_SET_VALUE,
+            &mut key,
+        );
+        if open_result.0 != 0 {
+            return Err(format!("Open startup registry key failed: {}", open_result.0));
+        }
 
-    if enabled {
-        let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-        let command = format!("\"{}\"", exe.to_string_lossy());
-        key.set_value("Quick Launcher", &command)
-            .map_err(|error| error.to_string())
-    } else {
-        key.delete_value("Quick Launcher")
-            .or_else(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => Ok(()),
-                _ => Err(error),
-            })
-            .map_err(|error| error.to_string())
+        let result = if enabled {
+            let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+            let command = format!("\"{}\"", exe.to_string_lossy());
+            let data = wide_path(&command);
+            let bytes = std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                data.len() * std::mem::size_of::<u16>(),
+            );
+            let set_result =
+                RegSetValueExW(key, PCWSTR(value_name.as_ptr()), Some(0), REG_SZ, Some(bytes));
+            if set_result.0 == 0 {
+                Ok(())
+            } else {
+                Err(format!("Set startup registry value failed: {}", set_result.0))
+            }
+        } else {
+            let delete_result = RegDeleteValueW(key, PCWSTR(value_name.as_ptr()));
+            if delete_result.0 == 0 || delete_result.0 == 2 {
+                Ok(())
+            } else {
+                Err(format!("Delete startup registry value failed: {}", delete_result.0))
+            }
+        };
+        let _ = RegCloseKey(key);
+        result
     }
 }
 

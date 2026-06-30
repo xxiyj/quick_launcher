@@ -459,9 +459,23 @@ export default function App() {
 
     if (uniquePaths.length === 1) {
       const path = uniquePaths[0];
-      setDraft(instantDraftFromPath(path));
-      setStatus("已读取拖入目标，请确认后保存");
-      void hydrateDraftFromPath(path);
+      try {
+        setStatus("正在解析拖入目标...");
+        const imported = await importTarget(path);
+        setDraft({
+          ...emptyDraft,
+          name: imported.displayName,
+          path: imported.path,
+          args: imported.args,
+          targetType: imported.targetType,
+          categoryId: selectedCategoryId(),
+        });
+        setStatus("已读取实际目标，请确认后保存");
+      } catch {
+        setDraft(instantDraftFromPath(path));
+        setStatus("已读取拖入目标，请确认后保存");
+        void hydrateDraftFromPath(path);
+      }
       return;
     }
 
