@@ -30,3 +30,4 @@ windows = { version = "0.61.3", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+tauri-plugin-single-instance = "2"

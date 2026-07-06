@@ -161,6 +161,9 @@ const BLUR_HIDE_SUPPRESSION: Duration = Duration::from_millis(1500);
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window_from_external_trigger(app);
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
