@@ -1,9 +1,10 @@
-﻿import {
+import {
   DndContext,
   KeyboardSensor,
   PointerSensor,
   closestCenter,
   type DragEndEvent,
+  useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
@@ -18,41 +19,61 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   AppWindow,
+  ChevronRight,
   Edit3,
+  Eye,
+  FilePenLine,
   Folder,
   FolderOpen,
+  FolderPlus,
   Grid2X2,
   Keyboard,
+  Link2,
   Maximize2,
   Minus,
   Plus,
   Search,
   Settings,
+  StickyNote,
   Trash2,
   X,
 } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import packageJson from "../package.json";
 import { buildSearchKey, matchesSearch } from "./search";
 import {
   assetUrl,
   chooseIcon,
   chooseTarget,
+  createWorkspaceFolder,
+  createWorkspaceShortcut,
   extractIcon,
   hideMainWindow,
   launchTarget,
   loadData,
+  moveWorkspaceFile,
+  readMemo,
+  recycleWorkspacePath,
+  renameWorkspaceFolder,
   revealDataDir,
   resolveTarget,
   saveData,
+  saveMemo,
   saveWindowSize,
-  updateStartup,
   updateHotkey,
+  updateStartup,
 } from "./tauri";
-import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, TargetType } from "./types";
+import type { Category, ItemDraft, ItemKind, LauncherData, LauncherItem, LaunchMode, TargetType } from "./types";
 
 const COLORS = ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0", "#00a3a3"];
+const APP_VERSION = packageJson.version.replace(/\.0$/, "");
+const BLUR_HIDE_DELAY_MS = 150;
+const TITLEBAR_BLUR_SUPPRESSION_MS = 1500;
+const WINDOW_MOVE_BLUR_SUPPRESSION_MS = 500;
 
 const emptyDraft: ItemDraft = {
   name: "",
@@ -62,13 +83,39 @@ const emptyDraft: ItemDraft = {
   categoryId: "default",
 };
 
+interface MemoDraft {
+  id?: string;
+  name: string;
+  content: string;
+  path?: string;
+  categoryId: string;
+  parentId: string | null;
+  lockCategory: boolean;
+  createdAt?: string;
+}
+
+interface FolderDraft {
+  id?: string;
+  name: string;
+  path?: string;
+  categoryId: string;
+  parentId: string | null;
+  lockCategory: boolean;
+  createdAt?: string;
+}
+
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 }
 
+function localMemoTitle(now = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+}
+
 function defaultData(): LauncherData {
   return {
-    version: 1,
+    version: 2,
     categories: [{ id: "default", name: "常用", color: "#2f80ed", order: 0 }],
     items: [],
     settings: {
@@ -79,6 +126,33 @@ function defaultData(): LauncherData {
       autoHideOnBlur: true,
       autoSortByLaunchCount: true,
       launchMode: "single",
+      defaultMemoCategoryId: "default",
+    },
+  };
+}
+
+function normalizeData(data: LauncherData): LauncherData {
+  const defaults = defaultData();
+  const categories = data.categories.length ? data.categories : defaults.categories;
+  const defaultMemoCategoryId = categories.some((category) => category.id === data.settings.defaultMemoCategoryId)
+    ? data.settings.defaultMemoCategoryId
+    : categories[0]?.id ?? "default";
+
+  return {
+    ...data,
+    version: 2,
+    categories,
+    items: data.items.map((item) => ({
+      ...item,
+      kind: item.kind ?? "launcher",
+      parentId: item.parentId ?? null,
+      args: item.args ?? "",
+      targetType: item.targetType ?? "program",
+    })),
+    settings: {
+      ...defaults.settings,
+      ...data.settings,
+      defaultMemoCategoryId,
     },
   };
 }
@@ -93,6 +167,10 @@ function isShortcutPath(path: string) {
   return /\.(lnk|link)$/i.test(path);
 }
 
+function isUrlPath(path: string) {
+  return /^https?:\/\//i.test(path.trim());
+}
+
 function isImageIconPath(path: string) {
   return /\.(png|jpe?g|ico)$/i.test(path);
 }
@@ -102,15 +180,71 @@ function isExtractableIconPath(path: string) {
 }
 
 function inferType(path: string): TargetType {
+  if (isUrlPath(path) || /\.url$/i.test(path.trim())) return "url";
   if (isShortcutPath(path)) return "shortcut";
   if (/\.exe$/i.test(path)) return "program";
   return "folder";
 }
 
-function targetLabel(targetType: TargetType) {
+function targetLabel(targetType?: TargetType) {
+  if (targetType === "url") return "网址";
   if (targetType === "folder") return "文件夹";
   if (targetType === "shortcut") return "快捷方式";
   return "程序";
+}
+
+function isLauncher(item: LauncherItem): item is LauncherItem & { kind: "launcher"; targetType: TargetType; args: string } {
+  return item.kind === "launcher" && Boolean(item.targetType);
+}
+
+function isWorkspaceFolder(item: LauncherItem | undefined): item is LauncherItem & { kind: "workspaceFolder" } {
+  return item?.kind === "workspaceFolder";
+}
+
+function itemLabel(item: LauncherItem) {
+  if (item.kind === "memo") return "备忘录";
+  if (item.kind === "workspaceFolder") return "应用文件夹";
+  return targetLabel(item.targetType);
+}
+
+function replacePathPrefix(path: string, oldPrefix: string, newPrefix: string) {
+  const normalizedPath = path.replace(/\//g, "\\");
+  const normalizedOld = oldPrefix.replace(/\//g, "\\").replace(/\\+$/, "");
+  const normalizedNew = newPrefix.replace(/\//g, "\\").replace(/\\+$/, "");
+  if (normalizedPath.toLowerCase() === normalizedOld.toLowerCase()) return normalizedNew;
+  const withSeparator = `${normalizedOld}\\`;
+  if (normalizedPath.toLowerCase().startsWith(withSeparator.toLowerCase())) {
+    return `${normalizedNew}${normalizedPath.slice(normalizedOld.length)}`;
+  }
+  return path;
+}
+
+function collectDescendantIds(items: LauncherItem[], rootId: string) {
+  const ids = new Set<string>([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const item of items) {
+      if (item.parentId && ids.has(item.parentId) && !ids.has(item.id)) {
+        ids.add(item.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}
+
+function folderPathLabel(folder: LauncherItem, folders: LauncherItem[]) {
+  const byId = new Map(folders.map((item) => [item.id, item]));
+  const names = [folder.name];
+  const seen = new Set<string>([folder.id]);
+  let parent = folder.parentId ? byId.get(folder.parentId) : undefined;
+  while (parent && !seen.has(parent.id)) {
+    names.unshift(parent.name);
+    seen.add(parent.id);
+    parent = parent.parentId ? byId.get(parent.parentId) : undefined;
+  }
+  return names.join(" / ");
 }
 
 export default function App() {
@@ -119,13 +253,17 @@ export default function App() {
   const [status, setStatus] = useState("正在读取启动器数据...");
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ItemDraft | null>(null);
+  const [memoDraft, setMemoDraft] = useState<MemoDraft | null>(null);
+  const [folderDraft, setFolderDraft] = useState<FolderDraft | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const resizeSaveTimer = useRef<number | undefined>(undefined);
+  const pendingBlurHide = useRef<number | undefined>(undefined);
   const ignoreAutoHideUntil = useRef(0);
   const lastSavedWindowSize = useRef<{ width: number; height: number } | undefined>(undefined);
   const sensors = useSensors(
@@ -137,15 +275,18 @@ export default function App() {
     () => [...data.categories].sort((a, b) => a.order - b.order),
     [data.categories],
   );
+  const currentFolder = useMemo(
+    () => data.items.find((item) => item.id === currentFolderId && item.kind === "workspaceFolder"),
+    [currentFolderId, data.items],
+  );
+  const modalOpen = Boolean(draft || memoDraft || folderDraft || settingsOpen);
 
   useEffect(() => {
     loadData()
       .then((envelope) => {
-        setData({
-          ...envelope.data,
-          settings: { ...defaultData().settings, ...envelope.data.settings },
-        });
-        lastSavedWindowSize.current = envelope.data.settings.windowSize;
+        const nextData = normalizeData(envelope.data);
+        setData(nextData);
+        lastSavedWindowSize.current = nextData.settings.windowSize;
         setDataPath(envelope.dataPath);
         setStatus(envelope.writable ? "已准备好" : envelope.message ?? "数据目录不可写");
         setLoaded(true);
@@ -183,9 +324,7 @@ export default function App() {
           return;
         }
         setDragActive(false);
-        if (event.payload.paths.length > 0) {
-          void addDroppedPaths(event.payload.paths);
-        }
+        if (event.payload.paths.length > 0) void addDroppedPaths(event.payload.paths);
       })
       .then((cleanup) => {
         unlisten = cleanup;
@@ -193,7 +332,7 @@ export default function App() {
       .catch((error) => setStatus(`拖动监听失败：${String(error)}`));
 
     return () => unlisten?.();
-  }, [categories, data.items, selectedCategory]);
+  }, [categories, currentFolder, data.items, data.settings.defaultMemoCategoryId, selectedCategory]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -233,18 +372,60 @@ export default function App() {
     let cleanup: (() => void) | undefined;
 
     appWindow
+      .onMoved(() => {
+        // A native titlebar drag can briefly report a blur before the move completes.
+        ignoreAutoHideUntil.current = Date.now() + WINDOW_MOVE_BLUR_SUPPRESSION_MS;
+        window.clearTimeout(pendingBlurHide.current);
+        pendingBlurHide.current = undefined;
+      })
+      .then((unlisten) => {
+        cleanup = unlisten;
+      })
+      .catch((error) => setStatus(`窗口移动监听失败：${String(error)}`));
+
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const appWindow = getCurrentWindow();
+    let cleanup: (() => void) | undefined;
+
+    function cancelPendingBlurHide() {
+      window.clearTimeout(pendingBlurHide.current);
+      pendingBlurHide.current = undefined;
+    }
+
+    appWindow
       .onFocusChanged((event) => {
-        if (event.payload || !data.settings.autoHideOnBlur || draft || settingsOpen) return;
+        if (event.payload) {
+          cancelPendingBlurHide();
+          return;
+        }
+        if (!data.settings.autoHideOnBlur || modalOpen) return;
         if (Date.now() < ignoreAutoHideUntil.current) return;
-        void hideMainWindow("blur");
+        cancelPendingBlurHide();
+        pendingBlurHide.current = window.setTimeout(() => {
+          pendingBlurHide.current = undefined;
+          void appWindow
+            .isFocused()
+            .then((focused) => {
+              if (focused || Date.now() < ignoreAutoHideUntil.current) return;
+              return hideMainWindow("blur");
+            })
+            .catch((error) => setStatus(`窗口焦点检查失败：${String(error)}`));
+        }, BLUR_HIDE_DELAY_MS);
       })
       .then((unlisten) => {
         cleanup = unlisten;
       })
       .catch((error) => setStatus(`窗口焦点监听失败：${String(error)}`));
 
-    return () => cleanup?.();
-  }, [data.settings.autoHideOnBlur, draft, settingsOpen]);
+    return () => {
+      cancelPendingBlurHide();
+      cleanup?.();
+    };
+  }, [data.settings.autoHideOnBlur, modalOpen]);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -253,7 +434,7 @@ export default function App() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (draft || settingsOpen || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (modalOpen || event.ctrlKey || event.metaKey || event.altKey) return;
       if (isTypingTarget(event.target)) return;
 
       if (event.key.length === 1 && /[\p{L}\p{N}]/u.test(event.key)) {
@@ -262,14 +443,12 @@ export default function App() {
         requestAnimationFrame(() => searchInputRef.current?.focus());
         return;
       }
-
       if (event.key === "Backspace" && query) {
         event.preventDefault();
         setQuery((current) => current.slice(0, -1));
         requestAnimationFrame(() => searchInputRef.current?.focus());
         return;
       }
-
       if (event.key === "Escape" && query) {
         event.preventDefault();
         setQuery("");
@@ -279,89 +458,155 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [draft, query, settingsOpen]);
+  }, [modalOpen, query]);
 
   const visibleItems = useMemo(() => {
-    const searchAllCategories = Boolean(query.trim());
-    return [...data.items]
-      .filter((item) => searchAllCategories || selectedCategory === "all" || item.categoryId === selectedCategory)
-      .filter((item) => matchesSearch(item.name, item.searchKey, query))
+    const searching = Boolean(query.trim());
+    const scoped = data.items
+      .filter((item) => {
+        if (searching) return matchesSearch(item.name, item.searchKey, query);
+        if (currentFolder) return item.parentId === currentFolder.id;
+        return item.parentId == null && (selectedCategory === "all" || item.categoryId === selectedCategory);
+      })
       .sort((a, b) => {
         if (data.settings.autoSortByLaunchCount) {
           return (b.launchCount ?? 0) - (a.launchCount ?? 0) || a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN");
         }
         return a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN");
       });
-  }, [data.items, data.settings.autoSortByLaunchCount, query, selectedCategory]);
+    return scoped;
+  }, [currentFolder, data.items, data.settings.autoSortByLaunchCount, query, selectedCategory]);
 
-  const activeCategory = categories.find((category) => category.id === selectedCategory);
   const categoryCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const item of data.items) {
-      counts.set(item.categoryId, (counts.get(item.categoryId) ?? 0) + 1);
-    }
+    for (const item of data.items) counts.set(item.categoryId, (counts.get(item.categoryId) ?? 0) + 1);
     return counts;
   }, [data.items]);
 
-  function selectedCategoryId() {
-    return selectedCategory === "all" ? categories[0]?.id ?? "default" : selectedCategory;
-  }
+  const breadcrumbs = useMemo(() => {
+    const chain: LauncherItem[] = [];
+    const seen = new Set<string>();
+    let folder = currentFolder;
+    while (folder && !seen.has(folder.id)) {
+      chain.unshift(folder);
+      seen.add(folder.id);
+      folder = data.items.find((item) => item.id === folder?.parentId && item.kind === "workspaceFolder");
+    }
+    return chain;
+  }, [currentFolder, data.items]);
 
-  function selectCategory(id: string) {
-    setQuery("");
-    setSelectedCategory(id);
-    requestAnimationFrame(() => searchInputRef.current?.focus());
+  function selectedCategoryId() {
+    if (currentFolder) return currentFolder.categoryId;
+    if (selectedCategory !== "all") return selectedCategory;
+    return categories[0]?.id ?? "default";
   }
 
   function persist(updater: (value: LauncherData) => LauncherData) {
     setData((current) => updater(current));
   }
 
-  function withReorderedItems(items: LauncherItem[], orderedIds: string[], orderValues: number[]) {
-    const orderMap = new Map(orderedIds.map((id, index) => [id, orderValues[index] ?? index]));
-    return items.map((item) =>
-      orderMap.has(item.id) ? { ...item, order: orderMap.get(item.id) ?? item.order } : item,
-    );
+  function selectCategory(id: string) {
+    setQuery("");
+    setCurrentFolderId(null);
+    setSelectedCategory(id);
+    requestAnimationFrame(() => searchInputRef.current?.focus());
+  }
+
+  function enterFolder(folder: LauncherItem) {
+    setQuery("");
+    setCurrentFolderId(folder.id);
+    setSelectedCategory(folder.categoryId);
+  }
+
+  function reorderVisibleItems(activeId: string, overId: string) {
+    const oldIndex = visibleItems.findIndex((item) => item.id === activeId);
+    const newIndex = visibleItems.findIndex((item) => item.id === overId);
+    if (oldIndex < 0 || newIndex < 0) return;
+    const orderMap = new Map(arrayMove(visibleItems, oldIndex, newIndex).map((item, order) => [item.id, order]));
+    persist((current) => ({
+      ...current,
+      items: current.items.map((item) => (orderMap.has(item.id) ? { ...item, order: orderMap.get(item.id) ?? item.order } : item)),
+    }));
+  }
+
+  async function moveNodeIntoFolder(source: LauncherItem, destination: LauncherItem) {
+    if (!isWorkspaceFolder(destination) || source.kind === "workspaceFolder") return;
+    try {
+      let result;
+      if (source.kind === "memo") {
+        result = await moveWorkspaceFile(source.path, destination.path);
+      } else if (isLauncher(source)) {
+        result = await createWorkspaceShortcut(source.path, source.args, destination.path, source.name);
+      } else {
+        return;
+      }
+
+      const now = new Date().toISOString();
+      persist((current) => ({
+        ...current,
+        items: current.items.map((item) => {
+          if (item.id !== source.id) return item;
+          if (item.kind === "launcher") {
+            return {
+              ...item,
+              path: result.path,
+              args: "",
+              targetType: item.targetType === "url" ? "url" : "shortcut",
+              parentId: destination.id,
+              categoryId: destination.categoryId,
+              searchKey: buildSearchKey(item.name, result.path),
+              updatedAt: now,
+            };
+          }
+          return {
+            ...item,
+            path: result.path,
+            parentId: destination.id,
+            categoryId: destination.categoryId,
+            updatedAt: now,
+          };
+        }),
+      }));
+      if (isLauncher(source) && source.targetType !== "url") void fillExtractedIcon(result.path, source.id);
+      setStatus(`已移入「${destination.name}」`);
+    } catch (error) {
+      setStatus(`移动失败：${String(error)}`);
+    }
   }
 
   function handleItemDragEnd(event: DragEndEvent) {
-    if (query.trim() || data.settings.autoSortByLaunchCount) return;
     const activeId = String(event.active.id);
-    const overId = event.over ? String(event.over.id) : "";
+    const rawOverId = event.over ? String(event.over.id) : "";
+    const overId = rawOverId.startsWith("folder-drop-") ? rawOverId.slice("folder-drop-".length) : rawOverId;
     if (!overId || activeId === overId) return;
+    const source = data.items.find((item) => item.id === activeId);
+    const destination = data.items.find((item) => item.id === overId);
+    if (!source || !destination) return;
 
-    const scopedItems = visibleItems;
-    const oldIndex = scopedItems.findIndex((item) => item.id === activeId);
-    const newIndex = scopedItems.findIndex((item) => item.id === overId);
-    if (oldIndex < 0 || newIndex < 0) return;
-
-    const reordered = arrayMove(scopedItems, oldIndex, newIndex).map((item) => item.id);
-    const orderValues =
-      selectedCategory === "all" ? reordered.map((_, order) => order) : scopedItems.map((item) => item.order);
-    persist((current) => ({ ...current, items: withReorderedItems(current.items, reordered, orderValues) }));
+    if (destination.kind === "workspaceFolder" && source.kind !== "workspaceFolder") {
+      void moveNodeIntoFolder(source, destination);
+      return;
+    }
+    if (query.trim() || data.settings.autoSortByLaunchCount) return;
+    if ((source.parentId ?? null) !== (destination.parentId ?? null)) return;
+    reorderVisibleItems(activeId, overId);
   }
 
   function reorderCategories(activeId: string, overId: string) {
     const oldIndex = categories.findIndex((category) => category.id === activeId);
     const newIndex = categories.findIndex((category) => category.id === overId);
     if (oldIndex < 0 || newIndex < 0) return;
-    const reordered = arrayMove(categories, oldIndex, newIndex).map((category, order) => ({
-      ...category,
-      order,
-    }));
+    const reordered = arrayMove(categories, oldIndex, newIndex).map((category, order) => ({ ...category, order }));
     persist((current) => ({
       ...current,
-      categories: current.categories.map(
-        (category) => reordered.find((value) => value.id === category.id) ?? category,
-      ),
+      categories: current.categories.map((category) => reordered.find((value) => value.id === category.id) ?? category),
     }));
   }
 
   async function importTarget(path: string) {
     const resolved = await resolveTarget(path);
-    const displayName = inferName(isShortcutPath(path) ? path : resolved.path);
     return {
-      displayName,
+      displayName: inferName(isShortcutPath(path) ? path : resolved.path),
       path: resolved.path,
       args: resolved.args,
       targetType: resolved.targetType,
@@ -375,6 +620,7 @@ export default function App() {
       path,
       targetType: inferType(path),
       categoryId: selectedCategoryId(),
+      parentId: currentFolder?.id ?? null,
     };
   }
 
@@ -406,7 +652,7 @@ export default function App() {
       setData((current) => ({
         ...current,
         items: current.items.map((item) =>
-          item.id === itemId && !item.iconPath
+          item.id === itemId && item.kind === "launcher" && !item.iconPath
             ? { ...item, iconPath, updatedAt: new Date().toISOString() }
             : item,
         ),
@@ -422,16 +668,14 @@ export default function App() {
       let shouldExtractIcon = false;
       setData((current) => {
         const duplicate = current.items.some(
-          (item) => item.id !== itemId && item.path.toLowerCase() === imported.path.toLowerCase(),
+          (item) => item.id !== itemId && item.kind === "launcher" && item.path.toLowerCase() === imported.path.toLowerCase(),
         );
-        if (duplicate) {
-          return { ...current, items: current.items.filter((item) => item.id !== itemId) };
-        }
+        if (duplicate) return { ...current, items: current.items.filter((item) => item.id !== itemId) };
         shouldExtractIcon = true;
         return {
           ...current,
           items: current.items.map((item) =>
-            item.id === itemId
+            item.id === itemId && item.kind === "launcher"
               ? {
                   ...item,
                   name: item.name === inferName(originalPath) ? imported.displayName : item.name,
@@ -445,9 +689,7 @@ export default function App() {
           ),
         };
       });
-      if (shouldExtractIcon) {
-        void fillExtractedIcon(imported.path, itemId);
-      }
+      if (shouldExtractIcon) void fillExtractedIcon(imported.path, itemId);
     } catch {
       void fillExtractedIcon(originalPath, itemId);
     }
@@ -455,7 +697,7 @@ export default function App() {
 
   async function addDroppedPaths(paths: string[]) {
     const uniquePaths = [...new Set(paths.map((path) => path.trim()).filter(Boolean))];
-    if (uniquePaths.length === 0) return;
+    if (!uniquePaths.length) return;
 
     if (uniquePaths.length === 1) {
       const path = uniquePaths[0];
@@ -469,6 +711,7 @@ export default function App() {
           args: imported.args,
           targetType: imported.targetType,
           categoryId: selectedCategoryId(),
+          parentId: currentFolder?.id ?? null,
         });
         setStatus("已读取实际目标，请确认后保存");
       } catch {
@@ -479,11 +722,12 @@ export default function App() {
       return;
     }
 
-    const existing = new Set(data.items.map((item) => item.path.toLowerCase()));
+    const existing = new Set(
+      data.items.filter((item) => item.kind === "launcher").map((item) => item.path.toLowerCase()),
+    );
     const now = new Date().toISOString();
     const categoryId = selectedCategoryId();
     const additions: LauncherItem[] = [];
-
     for (const path of uniquePaths) {
       if (existing.has(path.toLowerCase())) continue;
       existing.add(path.toLowerCase());
@@ -491,11 +735,13 @@ export default function App() {
       const name = inferName(path);
       additions.push({
         id,
+        kind: "launcher",
         name,
         path,
         args: "",
         targetType: inferType(path),
         categoryId,
+        parentId: null,
         iconPath: undefined,
         searchKey: buildSearchKey(name, path),
         order: data.items.length + additions.length,
@@ -504,45 +750,85 @@ export default function App() {
         updatedAt: now,
       });
     }
-
-    if (additions.length === 0) {
+    if (!additions.length) {
       setStatus("拖入的目标已存在");
       return;
     }
-
     persist((current) => ({ ...current, items: [...current.items, ...additions] }));
     setStatus(`已添加 ${additions.length} 个拖入目标，正在后台解析`);
     additions.forEach((item) => void hydrateItemFromPath(item.path, item.id));
   }
 
   function addCategory(name: string) {
-    name = name.trim();
-    if (!name) return;
-    const color = COLORS[data.categories.length % COLORS.length];
+    const trimmed = name.trim();
+    if (!trimmed) return;
     const category: Category = {
       id: newId("cat"),
-      name,
-      color,
+      name: trimmed,
+      color: COLORS[data.categories.length % COLORS.length],
       order: data.categories.length,
     };
     persist((current) => ({ ...current, categories: [...current.categories, category] }));
     selectCategory(category.id);
+    setStatus("已新建分组");
+  }
+
+  function renameCategory(id: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setStatus("分组名称不能为空");
+      return;
+    }
+    persist((current) => ({
+      ...current,
+      categories: current.categories.map((category) => (category.id === id ? { ...category, name: trimmed } : category)),
+    }));
+    setStatus("分组名称已更新");
   }
 
   function deleteCategory(id: string) {
     if (data.categories.length <= 1) {
-      setStatus("至少保留一个分类");
+      setStatus("至少保留一个分组");
       return;
     }
-    const fallback = data.categories.find((category) => category.id !== id)?.id ?? "default";
+    const fallback = categories.find((category) => category.id !== id)?.id ?? "default";
+    const category = categories.find((value) => value.id === id);
+    const fallbackName = categories.find((value) => value.id === fallback)?.name ?? "其他分组";
+    const itemCount = data.items.filter((item) => item.categoryId === id).length;
+    if (!window.confirm(`确定删除分组「${category?.name ?? "该分组"}」吗？其中 ${itemCount} 项内容将归入「${fallbackName}」。`)) return;
     persist((current) => ({
       ...current,
       categories: current.categories.filter((category) => category.id !== id),
       items: current.items.map((item) =>
         item.categoryId === id ? { ...item, categoryId: fallback, updatedAt: new Date().toISOString() } : item,
       ),
+      settings: {
+        ...current.settings,
+        defaultMemoCategoryId: current.settings.defaultMemoCategoryId === id ? fallback : current.settings.defaultMemoCategoryId,
+      },
     }));
-    selectCategory("all");
+    if (selectedCategory === id) selectCategory("all");
+  }
+
+  function openLaunchDraft(item?: LauncherItem) {
+    if (item && isLauncher(item)) {
+      setDraft({
+        id: item.id,
+        name: item.name,
+        path: item.path,
+        args: item.args,
+        targetType: item.targetType,
+        categoryId: item.categoryId,
+        parentId: item.parentId ?? null,
+        iconPath: item.iconPath,
+      });
+      return;
+    }
+    setDraft({ ...emptyDraft, categoryId: selectedCategoryId(), parentId: currentFolder?.id ?? null });
+  }
+
+  function openShortcutDraft() {
+    setDraft({ ...emptyDraft, targetType: "shortcut", categoryId: selectedCategoryId(), parentId: currentFolder?.id ?? null });
   }
 
   async function pickTarget(targetType: TargetType) {
@@ -553,7 +839,7 @@ export default function App() {
       name: current?.name || inferName(path),
       path,
       targetType: inferType(path),
-      categoryId: current?.categoryId || categories[0]?.id || "default",
+      categoryId: current?.categoryId || selectedCategoryId(),
     }));
     try {
       const imported = await importTarget(path);
@@ -563,7 +849,7 @@ export default function App() {
         args: current?.args || imported.args,
         name: current?.name || imported.displayName,
         targetType: imported.targetType,
-        categoryId: current?.categoryId || categories[0]?.id || "default",
+        categoryId: current?.categoryId || selectedCategoryId(),
       }));
     } catch {
       setStatus("目标解析失败，已保留原始路径");
@@ -577,9 +863,7 @@ export default function App() {
       setDraft((current) => ({ ...(current ?? emptyDraft), iconPath: path }));
       return;
     }
-
     if (!isExtractableIconPath(path)) return;
-
     try {
       setStatus("正在提取图标...");
       const source = isShortcutPath(path) ? (await resolveTarget(path)).path : path;
@@ -601,21 +885,46 @@ export default function App() {
       setStatus("名称和路径不能为空");
       return;
     }
+    if (draft.targetType === "url" && !isUrlPath(draft.path)) {
+      setStatus("网址必须以 http:// 或 https:// 开头");
+      return;
+    }
     const now = new Date().toISOString();
-    const id = draft.id ?? newId("item");
-    const shouldExtractIcon = !draft.iconPath;
+    const existing = draft.id ? data.items.find((item) => item.id === draft.id && item.kind === "launcher") : undefined;
+    const parent = draft.parentId
+      ? data.items.find((item) => item.id === draft.parentId && item.kind === "workspaceFolder")
+      : undefined;
+    const parentId = parent?.id ?? null;
+    const shouldPlaceInFolder = Boolean(parent) || Boolean(existing?.parentId && existing.parentId !== parentId);
+    let path = draft.path.trim();
+    let args = draft.args.trim();
+    let targetType = draft.targetType;
+    if (shouldPlaceInFolder) {
+      try {
+        setStatus("正在放入文件夹...");
+        const result = await createWorkspaceShortcut(path, args, parent?.path ?? null, draft.name.trim());
+        path = result.path;
+        args = "";
+        targetType = draft.targetType === "url" ? "url" : "shortcut";
+      } catch (error) {
+        setStatus(`放入文件夹失败：${String(error)}`);
+        return;
+      }
+    }
     const item: LauncherItem = {
-      id,
+      id: draft.id ?? newId("item"),
+      kind: "launcher",
       name: draft.name.trim(),
-      path: draft.path.trim(),
-      args: draft.args.trim(),
-      targetType: draft.targetType,
-      categoryId: draft.categoryId || categories[0]?.id || "default",
+      path,
+      args,
+      targetType,
+      categoryId: parent?.categoryId ?? draft.categoryId ?? selectedCategoryId(),
+      parentId,
       iconPath: draft.iconPath,
-      searchKey: buildSearchKey(draft.name, `${draft.path} ${draft.args}`),
-      order: draft.id ? data.items.find((value) => value.id === draft.id)?.order ?? 0 : data.items.length,
-      launchCount: data.items.find((value) => value.id === draft.id)?.launchCount ?? 0,
-      createdAt: data.items.find((value) => value.id === draft.id)?.createdAt ?? now,
+      searchKey: buildSearchKey(draft.name, `${path} ${args}`),
+      order: existing?.order ?? data.items.length,
+      launchCount: existing?.launchCount ?? 0,
+      createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
     persist((current) => ({
@@ -625,17 +934,166 @@ export default function App() {
         : [...current.items, item],
     }));
     setDraft(null);
-    setStatus("已添加，图标将在后台补齐");
-    if (shouldExtractIcon) {
-      void fillExtractedIcon(item.path, item.id);
+    setStatus(parent ? "已放入文件夹，图标将在后台补齐" : "已添加，图标将在后台补齐");
+    if (!item.iconPath && item.targetType !== "url") void fillExtractedIcon(item.path, item.id);
+  }
+
+  function openNewMemo() {
+    const parentId = currentFolder?.id ?? null;
+    setMemoDraft({
+      name: "",
+      content: "",
+      categoryId: selectedCategoryId(),
+      parentId,
+      lockCategory: false,
+    });
+  }
+
+  async function openMemo(item: LauncherItem) {
+    try {
+      setStatus("正在读取备忘录...");
+      const content = await readMemo(item.path);
+      setMemoDraft({
+        id: item.id,
+        name: item.name,
+        content,
+        path: item.path,
+        categoryId: item.categoryId,
+        parentId: item.parentId ?? null,
+        lockCategory: false,
+        createdAt: item.createdAt,
+      });
+      setStatus("备忘录已打开");
+    } catch (error) {
+      setStatus(`读取备忘录失败：${String(error)}`);
     }
   }
 
-  function removeItem(id: string) {
-    persist((current) => ({ ...current, items: current.items.filter((item) => item.id !== id) }));
+  async function submitMemoDraft() {
+    if (!memoDraft) return;
+    const memoName = memoDraft.name.trim() || (!memoDraft.id ? localMemoTitle() : "");
+    if (!memoName) {
+      setStatus("备忘录标题不能为空");
+      return;
+    }
+    try {
+      const parent = memoDraft.parentId
+        ? data.items.find((item) => item.id === memoDraft.parentId && item.kind === "workspaceFolder")
+        : undefined;
+      const result = await saveMemo(memoDraft.path ?? null, parent?.path ?? null, memoName, memoDraft.content);
+      const now = new Date().toISOString();
+      const existing = memoDraft.id ? data.items.find((item) => item.id === memoDraft.id) : undefined;
+      const item: LauncherItem = {
+        id: memoDraft.id ?? newId("memo"),
+        kind: "memo",
+        name: memoName,
+        path: result.path,
+        categoryId: memoDraft.categoryId,
+        parentId: memoDraft.parentId,
+        searchKey: buildSearchKey(memoName, memoDraft.content),
+        order: existing?.order ?? data.items.length,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      persist((current) => ({
+        ...current,
+        items: current.items.some((node) => node.id === item.id)
+          ? current.items.map((node) => (node.id === item.id ? item : node))
+          : [...current.items, item],
+      }));
+      setMemoDraft(null);
+      setStatus("备忘录已保存");
+    } catch (error) {
+      setStatus(`保存备忘录失败：${String(error)}`);
+    }
+  }
+
+  function openNewFolder() {
+    const parentId = currentFolder?.id ?? null;
+    setFolderDraft({
+      name: "",
+      categoryId: currentFolder?.categoryId ?? selectedCategoryId(),
+      parentId,
+      lockCategory: Boolean(parentId),
+    });
+  }
+
+  function openFolderEditor(item: LauncherItem) {
+    setFolderDraft({
+      id: item.id,
+      name: item.name,
+      path: item.path,
+      categoryId: item.categoryId,
+      parentId: item.parentId ?? null,
+      lockCategory: true,
+      createdAt: item.createdAt,
+    });
+  }
+
+  async function submitFolderDraft() {
+    if (!folderDraft?.name.trim()) {
+      setStatus("文件夹名称不能为空");
+      return;
+    }
+    try {
+      const parent = folderDraft.parentId
+        ? data.items.find((item) => item.id === folderDraft.parentId && item.kind === "workspaceFolder")
+        : undefined;
+      const result = folderDraft.path
+        ? await renameWorkspaceFolder(folderDraft.path, folderDraft.name)
+        : await createWorkspaceFolder(parent?.path ?? null, folderDraft.name);
+      const now = new Date().toISOString();
+      const existing = folderDraft.id ? data.items.find((item) => item.id === folderDraft.id) : undefined;
+      const item: LauncherItem = {
+        id: folderDraft.id ?? newId("folder"),
+        kind: "workspaceFolder",
+        name: folderDraft.name.trim(),
+        path: result.path,
+        categoryId: folderDraft.categoryId,
+        parentId: folderDraft.parentId,
+        searchKey: buildSearchKey(folderDraft.name, ""),
+        order: existing?.order ?? data.items.length,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      persist((current) => ({
+        ...current,
+        items: current.items.some((node) => node.id === item.id)
+          ? current.items.map((node) => {
+              if (node.id === item.id) return item;
+              if (folderDraft.path && node.id !== item.id) {
+                return { ...node, path: replacePathPrefix(node.path, folderDraft.path, result.path) };
+              }
+              return node;
+            })
+          : [...current.items, item],
+      }));
+      setFolderDraft(null);
+      setStatus(folderDraft.path ? "文件夹已重命名" : "文件夹已创建");
+    } catch (error) {
+      setStatus(`保存文件夹失败：${String(error)}`);
+    }
+  }
+
+  async function removeNode(item: LauncherItem) {
+    const label = item.kind === "workspaceFolder" ? "文件夹及其内容" : item.name;
+    if (!window.confirm(`确定删除「${label}」吗？受管理的文件会移入回收站。`)) return;
+    try {
+      await recycleWorkspacePath(item.path);
+      const removedIds = item.kind === "workspaceFolder" ? collectDescendantIds(data.items, item.id) : new Set([item.id]);
+      persist((current) => ({ ...current, items: current.items.filter((node) => !removedIds.has(node.id)) }));
+      if (currentFolderId && removedIds.has(currentFolderId)) setCurrentFolderId(null);
+      setDraft(null);
+      setMemoDraft(null);
+      setFolderDraft(null);
+      setStatus("已删除");
+    } catch (error) {
+      setStatus(`删除失败：${String(error)}`);
+    }
   }
 
   async function runItem(item: LauncherItem) {
+    if (!isLauncher(item)) return;
     try {
       await launchTarget(item.path, item.args, item.targetType);
       persist((current) => ({
@@ -647,9 +1105,7 @@ export default function App() {
         ),
       }));
       setQuery("");
-      if (data.settings.autoHideAfterLaunch) {
-        await hideMainWindow("launch");
-      }
+      if (data.settings.autoHideAfterLaunch) await hideMainWindow("launch");
       setStatus(`已启动 ${item.name}`);
     } catch (error) {
       setStatus(`启动失败：${String(error)}`);
@@ -690,104 +1146,87 @@ export default function App() {
   }
 
   return (
-    <main
-      className={`shell ${dragActive ? "dragging" : ""}`}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => event.preventDefault()}
-    >
+    <main className={`shell ${dragActive ? "dragging" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => event.preventDefault()}>
       <WindowTitlebar
         onTitlebarInteraction={() => {
-          ignoreAutoHideUntil.current = Date.now() + 1500;
+          ignoreAutoHideUntil.current = Date.now() + TITLEBAR_BLUR_SUPPRESSION_MS;
+          window.clearTimeout(pendingBlurHide.current);
+          pendingBlurHide.current = undefined;
         }}
       />
 
       <div className="main-layout">
         <aside className="sidebar">
-          <button
-            className={`category ${selectedCategory === "all" ? "active" : ""}`}
-            onClick={() => selectCategory("all")}
-            type="button"
-          >
-            <Grid2X2 size={18} />
-            <span>全部应用</span>
-            <b>{data.items.length}</b>
-          </button>
-
-          <div className="category-list">
-            {categories.map((category) => (
-              <button
-                className={`category ${selectedCategory === category.id ? "active" : ""}`}
-                key={category.id}
-                onClick={() => selectCategory(category.id)}
-                type="button"
-              >
-                <i style={{ background: category.color }} />
-                <span>{category.name}</span>
-                <b>{categoryCounts.get(category.id) ?? 0}</b>
-              </button>
-            ))}
-          </div>
-
-          <button className="settings-button" onClick={() => setSettingsOpen(true)} type="button">
-            <Settings size={17} />
-            设置
-          </button>
+          <SidebarCategoryList
+            allCount={data.items.length}
+            allSelected={selectedCategory === "all"}
+            categories={categories}
+            categoryCounts={categoryCounts}
+            onAddCategory={addCategory}
+            onDeleteCategory={deleteCategory}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onRenameCategory={renameCategory}
+            onReorderCategory={reorderCategories}
+            onSelectAll={() => selectCategory("all")}
+            onSelectCategory={selectCategory}
+            selectedCategoryId={selectedCategory}
+          />
         </aside>
 
         <section className="content">
           <header className="topbar">
             <div className="topbar-left">
-              <div className="view-title">
-                <p>{query ? "全部应用" : activeCategory?.name ?? "全部应用"}</p>
-                <h1>{query ? `搜索：${query}` : "快速启动"}</h1>
-              </div>
+              {currentFolder ? (
+                <div className="breadcrumb" aria-label="文件夹路径">
+                  <button onClick={() => setCurrentFolderId(null)} title="返回根目录" type="button"><Grid2X2 size={14} /></button>
+                  {breadcrumbs.map((folder) => (
+                    <span key={folder.id}>
+                      <ChevronRight size={14} />
+                      <button onClick={() => setCurrentFolderId(folder.id)} type="button">{folder.name}</button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
             <div className="actions">
               <label className="search">
                 <Search size={18} />
-                <input
-                  autoFocus
-                  ref={searchInputRef}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="搜索名称、英文或拼音首字母"
-                  value={query}
-                />
+                <input autoFocus ref={searchInputRef} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、备忘录或拼音首字母" value={query} />
               </label>
-              <button
-                className="primary icon-primary"
-                onClick={() => setDraft({ ...emptyDraft, categoryId: categories[0]?.id ?? "default" })}
-                title="添加"
-                type="button"
-              >
-                <Plus size={18} />
-              </button>
+              <button aria-label="新建备忘录" className="toolbar-action" onClick={openNewMemo} title="新建备忘录" type="button"><StickyNote size={17} /></button>
+              <button aria-label="新建文件夹" className="toolbar-action" onClick={openNewFolder} title="新建文件夹" type="button"><FolderPlus size={17} /></button>
+              <button className="primary icon-primary" onClick={() => openLaunchDraft()} title="添加启动项" type="button"><Plus size={18} /></button>
             </div>
           </header>
 
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleItemDragEnd}>
             <SortableContext items={visibleItems.map((item) => item.id)} strategy={rectSortingStrategy}>
-              <section className={`grid ${query.trim() ? "sorting-disabled" : ""}`} aria-label="启动项列表">
+              <section className={`grid ${query.trim() || data.settings.autoSortByLaunchCount ? "sorting-disabled" : ""}`} aria-label="启动项列表">
                 {visibleItems.map((item) => (
                   <SortableAppCard
-                    categoryName={categories.find((category) => category.id === item.categoryId)?.name ?? "未分类"}
-                    disabled={Boolean(query.trim()) || data.settings.autoSortByLaunchCount}
+                    categoryName={categories.find((category) => category.id === item.categoryId)?.name ?? "未分组"}
                     item={item}
                     key={item.id}
                     launchMode={data.settings.launchMode}
-                    onEdit={() => setDraft(item)}
-                    onRun={() => runItem(item)}
+                    onEdit={() => {
+                      if (item.kind === "workspaceFolder") openFolderEditor(item);
+                      else if (item.kind === "memo") void openMemo(item);
+                      else openLaunchDraft(item);
+                    }}
+                    onOpenFolder={() => enterFolder(item)}
+                    onOpenMemo={() => void openMemo(item)}
+                    onRun={() => void runItem(item)}
                   />
                 ))}
-
                 {!visibleItems.length ? (
                   <div className="empty">
                     <img alt="" className="empty-icon" src="/app-icon.png" />
-                    <h2>{query ? "没有找到匹配项" : "还没有启动项"}</h2>
-                    <p>{query ? "试试应用名、英文缩写或中文拼音首字母。" : "添加常用程序或文件夹，把桌面留给真正需要看的东西。"}</p>
-                    <button className="primary" onClick={() => setDraft({ ...emptyDraft, categoryId: categories[0]?.id ?? "default" })} type="button">
-                      <Plus size={18} />
-                      添加启动项
-                    </button>
+                    <h2>{query ? "没有找到匹配项" : "这里还没有内容"}</h2>
+                    <p>{query ? "试试标题、备忘录正文、英文缩写或中文拼音首字母。" : "添加快捷方式，或新建备忘录。"}</p>
+                    <div className="empty-actions">
+                      <button className="ghost" onClick={openShortcutDraft} type="button"><Link2 size={18} />添加快捷方式</button>
+                      <button className="primary" onClick={openNewMemo} type="button"><StickyNote size={18} />新建备忘录</button>
+                    </div>
                   </div>
                 ) : null}
               </section>
@@ -805,38 +1244,58 @@ export default function App() {
         <ItemModal
           categories={categories}
           draft={draft}
+          folders={data.items.filter((item) => item.kind === "workspaceFolder")}
           onChange={setDraft}
           onClose={() => setDraft(null)}
-          onDelete={
-            draft.id
-              ? () => {
-                  const name = draft.name.trim() || "\u8fd9\u4e2a\u542f\u52a8\u9879";
-                  if (!window.confirm(`\u786e\u5b9a\u5220\u9664\u300c${name}\u300d\u5417\uff1f`)) return;
-                  removeItem(draft.id!);
-                  setDraft(null);
-                }
-              : undefined
-          }
+          onDelete={draft.id ? () => {
+            const item = data.items.find((node) => node.id === draft.id);
+            if (item) void removeNode(item);
+          } : undefined}
           onPickIcon={pickIcon}
           onPickTarget={pickTarget}
-          onSubmit={submitDraft}
+          onSubmit={() => void submitDraft()}
+        />
+      ) : null}
+
+      {memoDraft ? (
+        <MemoModal
+          categories={categories}
+          draft={memoDraft}
+          folders={data.items.filter((item) => item.kind === "workspaceFolder")}
+          onChange={setMemoDraft}
+          onClose={() => setMemoDraft(null)}
+          onDelete={memoDraft.id ? () => {
+            const item = data.items.find((node) => node.id === memoDraft.id);
+            if (item) void removeNode(item);
+          } : undefined}
+          onSubmit={() => void submitMemoDraft()}
+        />
+      ) : null}
+
+      {folderDraft ? (
+        <FolderModal
+          categories={categories}
+          draft={folderDraft}
+          onChange={setFolderDraft}
+          onClose={() => setFolderDraft(null)}
+          onDelete={folderDraft.id ? () => {
+            const item = data.items.find((node) => node.id === folderDraft.id);
+            if (item) void removeNode(item);
+          } : undefined}
+          onSubmit={() => void submitFolderDraft()}
         />
       ) : null}
 
       {settingsOpen ? (
         <SettingsModal
-          categories={categories}
-          closeToTray={data.settings.closeToTray}
-          hotkey={data.settings.hotkey}
           autoStart={data.settings.autoStart}
           autoHideAfterLaunch={data.settings.autoHideAfterLaunch}
           autoHideOnBlur={data.settings.autoHideOnBlur}
           autoSortByLaunchCount={data.settings.autoSortByLaunchCount}
+          closeToTray={data.settings.closeToTray}
+          hotkey={data.settings.hotkey}
           launchMode={data.settings.launchMode}
-          onAddCategory={addCategory}
           onClose={() => setSettingsOpen(false)}
-          onDeleteCategory={deleteCategory}
-          onReorderCategory={reorderCategories}
           onSubmit={saveSettings}
         />
       ) : null}
@@ -852,66 +1311,254 @@ export default function App() {
   );
 }
 
-interface ItemModalProps {
+interface SidebarCategoryListProps {
+  allCount: number;
+  allSelected: boolean;
   categories: Category[];
-  draft: ItemDraft;
-  onChange: (draft: ItemDraft) => void;
-  onClose: () => void;
-  onDelete?: () => void;
-  onPickIcon: () => void;
-  onPickTarget: (type: TargetType) => void;
-  onSubmit: () => void;
+  categoryCounts: Map<string, number>;
+  onAddCategory: (name: string) => void;
+  onDeleteCategory: (id: string) => void;
+  onOpenSettings: () => void;
+  onRenameCategory: (id: string, name: string) => void;
+  onReorderCategory: (activeId: string, overId: string) => void;
+  onSelectAll: () => void;
+  onSelectCategory: (id: string) => void;
+  selectedCategoryId: string;
 }
 
-interface WindowTitlebarProps {
-  onTitlebarInteraction: () => void;
+function SidebarCategoryList({ allCount, allSelected, categories, categoryCounts, onAddCategory, onDeleteCategory, onOpenSettings, onRenameCategory, onReorderCategory, onSelectAll, onSelectCategory, selectedCategoryId }: SidebarCategoryListProps) {
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  function submitCategory() {
+    const name = newCategoryName.trim();
+    setAddingCategory(false);
+    setNewCategoryName("");
+    if (name) onAddCategory(name);
+  }
+
+  function cancelAddingCategory() {
+    setAddingCategory(false);
+    setNewCategoryName("");
+  }
+
+  function handleCategoryDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (overId && activeId !== overId) onReorderCategory(activeId, overId);
+  }
+
+  return (
+    <>
+      <div className="sidebar-all-row">
+        <button className={`category ${allSelected ? "active" : ""}`} onClick={onSelectAll} type="button">
+          <Grid2X2 size={18} />
+          <span>全部应用</span>
+          <b>{allCount}</b>
+        </button>
+        <button aria-label="新建分组" className="sidebar-add-category" disabled={addingCategory} onClick={() => setAddingCategory(true)} title="新建分组" type="button"><Plus size={18} /></button>
+      </div>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleCategoryDragEnd}>
+        <SortableContext items={categories.map((category) => category.id)} strategy={verticalListSortingStrategy}>
+          <div className="category-list">
+            {categories.map((category) => (
+              <SortableSidebarCategory
+                category={category}
+                count={categoryCounts.get(category.id) ?? 0}
+                disabledDelete={categories.length <= 1}
+                key={category.id}
+                onDelete={() => onDeleteCategory(category.id)}
+                onRename={(name) => onRenameCategory(category.id, name)}
+                onSelect={() => onSelectCategory(category.id)}
+                selected={selectedCategoryId === category.id}
+              />
+            ))}
+            {addingCategory ? (
+              <div className="sidebar-category-create">
+                <input
+                  aria-label="新分组名称"
+                  autoFocus
+                  onBlur={submitCategory}
+                  onChange={(event) => setNewCategoryName(event.target.value)}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      cancelAddingCategory();
+                    }
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  placeholder="分组名称"
+                  value={newCategoryName}
+                />
+              </div>
+            ) : null}
+          </div>
+        </SortableContext>
+      </DndContext>
+      <div className="sidebar-footer">
+        <button className="settings-button" onClick={onOpenSettings} type="button">
+          <Settings size={17} />
+          设置
+        </button>
+      </div>
+    </>
+  );
+}
+
+interface SortableSidebarCategoryProps {
+  category: Category;
+  count: number;
+  disabledDelete: boolean;
+  onDelete: () => void;
+  onRename: (name: string) => void;
+  onSelect: () => void;
+  selected: boolean;
+}
+
+function SortableSidebarCategory({ category, count, disabledDelete, onDelete, onRename, onSelect, selected }: SortableSidebarCategoryProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: category.id });
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(category.name);
+  const style = { transform: CSS.Transform.toString(transform), transition };
+
+  useEffect(() => {
+    if (!editing) setName(category.name);
+  }, [category.name, editing]);
+
+  function startEditing(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setName(category.name);
+    setEditing(true);
+  }
+
+  function submitRename() {
+    const nextName = name.trim();
+    if (nextName && nextName !== category.name) onRename(nextName);
+    setEditing(false);
+  }
+
+  function cancelRename() {
+    setName(category.name);
+    setEditing(false);
+  }
+
+  return (
+    <div className={`sidebar-category-row ${selected ? "active" : ""} ${disabledDelete ? "delete-disabled" : ""} ${isDragging ? "drag-sorting" : ""}`} ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      {editing ? (
+        <div className="sidebar-category-editor">
+          <i style={{ background: category.color }} />
+          <input
+            aria-label="分组名称"
+            autoFocus
+            onBlur={submitRename}
+            onChange={(event) => setName(event.target.value)}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.blur();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelRename();
+              }
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            value={name}
+          />
+        </div>
+      ) : (
+        <>
+          <button className={`category sidebar-category-main ${selected ? "active" : ""}`} onClick={onSelect} onDoubleClick={startEditing} title="双击修改分组名称" type="button">
+            <i style={{ background: category.color }} />
+            <span>{category.name}</span>
+            <b>{count}</b>
+          </button>
+          <button
+            aria-label={`删除分组 ${category.name}`}
+            className="sidebar-category-delete"
+            disabled={disabledDelete}
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete();
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            title={disabledDelete ? "至少保留一个分组" : "删除分组"}
+            type="button"
+          ><Trash2 size={15} /></button>
+        </>
+      )}
+    </div>
+  );
 }
 
 interface SortableAppCardProps {
   categoryName: string;
-  disabled: boolean;
   item: LauncherItem;
   launchMode: LaunchMode;
   onEdit: () => void;
+  onOpenFolder: () => void;
+  onOpenMemo: () => void;
   onRun: () => void;
 }
 
-function SortableAppCard({ categoryName, disabled, item, launchMode, onEdit, onRun }: SortableAppCardProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: item.id,
-    disabled,
-  });
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
+function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onRun }: SortableAppCardProps) {
+  const folder = item.kind === "workspaceFolder";
+  const sortable = useSortable({ id: item.id, disabled: folder });
+  const droppable = useDroppable({ id: `folder-drop-${item.id}`, disabled: !folder });
+  const style = { transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition };
+  const isOverFolder = folder && droppable.isOver;
+  const isDragging = sortable.isDragging;
+  const icon = item.kind === "memo"
+    ? <StickyNote size={34} />
+    : folder
+      ? <FolderOpen size={34} />
+      : item.iconPath
+        ? <img alt="" src={assetUrl(item.iconPath)} />
+        : item.targetType === "folder"
+          ? <FolderOpen size={34} />
+          : item.targetType === "url"
+            ? <Link2 size={34} />
+            : <AppWindow size={34} />;
+
+  function activate() {
+    if (folder) onOpenFolder();
+    else if (item.kind === "memo") onOpenMemo();
+    else if (launchMode === "single") onRun();
+  }
 
   return (
     <article
-      className={`app-card ${isDragging ? "drag-sorting" : ""}`}
-      key={item.id}
-      onDoubleClick={launchMode === "double" ? onRun : undefined}
-      ref={setNodeRef}
+      className={`app-card ${folder ? "workspace-folder-card" : ""} ${isDragging ? "drag-sorting" : ""} ${isOverFolder ? "folder-drop-target" : ""}`}
+      onDoubleClick={isLauncher(item) && launchMode === "double" ? onRun : undefined}
+      ref={folder ? droppable.setNodeRef : sortable.setNodeRef}
       style={style}
-      {...attributes}
-      {...listeners}
+      {...(!folder ? sortable.attributes : {})}
+      {...(!folder ? sortable.listeners : {})}
     >
-      <button className="app-main" onClick={launchMode === "single" ? onRun : undefined} type="button">
-        <span className="app-icon">
-          {item.iconPath ? <img alt="" src={assetUrl(item.iconPath)} /> : item.targetType === "folder" ? <FolderOpen size={34} /> : <AppWindow size={34} />}
-        </span>
+      <button className="app-main" onClick={activate} type="button">
+        <span className="app-icon">{icon}</span>
         <span className="app-name">{item.name}</span>
-        <span className="app-meta">
-          {targetLabel(item.targetType)}
-          <i />
-          {categoryName}
-        </span>
+        <span className="app-meta">{itemLabel(item)}<i />{categoryName}</span>
       </button>
       <div className="card-tools">
-        <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title="编辑" type="button"><Edit3 size={16} /></button>
+        <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title={folder ? "重命名" : item.kind === "memo" ? "编辑备忘录" : "编辑"} type="button"><Edit3 size={16} /></button>
       </div>
+      {isOverFolder ? <span className="folder-drop-hint">放入文件夹</span> : null}
     </article>
   );
+}
+
+interface WindowTitlebarProps {
+  onTitlebarInteraction: () => void;
 }
 
 function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
@@ -929,13 +1576,9 @@ function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
   async function control(action: "minimize" | "maximize" | "close") {
     if (!("__TAURI_INTERNALS__" in window)) return;
     const appWindow = getCurrentWindow();
-    if (action === "minimize") {
-      await appWindow.minimize();
-    } else if (action === "maximize") {
-      await appWindow.toggleMaximize();
-    } else {
-      await appWindow.close();
-    }
+    if (action === "minimize") await appWindow.minimize();
+    else if (action === "maximize") await appWindow.toggleMaximize();
+    else await appWindow.close();
   }
 
   return (
@@ -943,80 +1586,114 @@ function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
       <div className="titlebar-drag" onMouseDown={(event) => void startDrag(event)}>
         <div className="titlebar-brand">
           <div className="brand-mark"><img alt="" src="/app-icon.png" /></div>
-          <div className="brand-copy">
-            <strong>Quick Launcher</strong>
-            <span>桌面快速启动器</span>
-          </div>
+          <div className="brand-copy"><strong>Quick Launcher</strong><span>桌面快速启动器</span></div>
         </div>
       </div>
       <div className="window-controls">
-        <button onClick={() => void control("minimize")} title="最小化" type="button">
-          <Minus size={16} />
-        </button>
-        <button onClick={() => void control("maximize")} title="最大化/还原" type="button">
-          <Maximize2 size={15} />
-        </button>
-        <button className="close-window" onClick={() => void control("close")} title="关闭" type="button">
-          <X size={16} />
-        </button>
+        <button onClick={() => void control("minimize")} title="最小化" type="button"><Minus size={16} /></button>
+        <button onClick={() => void control("maximize")} title="最大化/还原" type="button"><Maximize2 size={15} /></button>
+        <button className="close-window" onClick={() => void control("close")} title="关闭" type="button"><X size={16} /></button>
       </div>
     </header>
   );
 }
 
-function ItemModal({ categories, draft, onChange, onClose, onDelete, onPickIcon, onPickTarget, onSubmit }: ItemModalProps) {
+interface ItemModalProps {
+  categories: Category[];
+  draft: ItemDraft;
+  folders: LauncherItem[];
+  onChange: (draft: ItemDraft) => void;
+  onClose: () => void;
+  onDelete?: () => void;
+  onPickIcon: () => void;
+  onPickTarget: (type: TargetType) => void;
+  onSubmit: () => void;
+}
+
+function ItemModal({ categories, draft, folders, onChange, onClose, onDelete, onPickIcon, onPickTarget, onSubmit }: ItemModalProps) {
+  const availableFolders = useMemo(
+    () => folders.filter((folder) => folder.categoryId === draft.categoryId).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN")),
+    [draft.categoryId, folders],
+  );
   return (
     <div className="modal-backdrop">
       <section className="modal">
-        <header>
-          <h2>{draft.id ? "编辑启动项" : "添加启动项"}</h2>
-          <button onClick={onClose} title="关闭" type="button"><X size={18} /></button>
-        </header>
+        <header><h2>{draft.id ? "编辑启动项" : "添加启动项"}</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="form-grid">
-          <label>
-            名称
-            <input value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} />
-          </label>
-          <label>
-            分类
-            <select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value })}>
-              {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select>
-          </label>
-          <label>
-            类型
-            <select value={draft.targetType} onChange={(event) => onChange({ ...draft, targetType: event.target.value as TargetType })}>
-              <option value="program">程序</option>
-              <option value="shortcut">快捷方式</option>
-              <option value="folder">文件夹</option>
-            </select>
-          </label>
-          <label>
-            启动参数
-            <input value={draft.args} onChange={(event) => onChange({ ...draft, args: event.target.value })} placeholder="可选" />
-          </label>
-          <label className="wide">
-            路径
-            <div className="inline-input">
-              <input value={draft.path} onChange={(event) => onChange({ ...draft, path: event.target.value, targetType: inferType(event.target.value) })} />
-              <button onClick={() => onPickTarget(draft.targetType)} type="button"><Folder size={16} />选择</button>
-            </div>
-          </label>
-          <label className="wide">
-            图标
-            <div className="inline-input">
-              <input value={draft.iconPath ?? ""} onChange={(event) => onChange({ ...draft, iconPath: event.target.value })} placeholder="自动提取，或手动选择图片/exe/lnk" />
-              <button onClick={onPickIcon} type="button"><AppWindow size={16} />选择</button>
-            </div>
-          </label>
+          <label className="wide">名称<input value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
+          <label>分组<select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value, parentId: null })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+          <label>文件夹<select value={draft.parentId ?? ""} onChange={(event) => {
+            const parentId = event.target.value || null;
+            const folder = folders.find((item) => item.id === parentId);
+            onChange({ ...draft, parentId, categoryId: folder?.categoryId ?? draft.categoryId });
+          }}><option value="">分组根目录</option>{availableFolders.map((folder) => <option key={folder.id} value={folder.id}>{folderPathLabel(folder, folders)}</option>)}</select></label>
+          <label>类型<select value={draft.targetType} onChange={(event) => onChange({ ...draft, targetType: event.target.value as TargetType })}><option value="program">程序</option><option value="shortcut">快捷方式</option><option value="folder">系统文件夹</option><option value="url">网址</option></select></label>
+          <label>启动参数<input value={draft.args} onChange={(event) => onChange({ ...draft, args: event.target.value })} placeholder="可选" /></label>
+          <label className="wide">路径{draft.targetType === "url" ? <input value={draft.path} onChange={(event) => onChange({ ...draft, path: event.target.value, targetType: "url" })} placeholder="https://example.com" /> : <div className="inline-input"><input value={draft.path} onChange={(event) => onChange({ ...draft, path: event.target.value, targetType: inferType(event.target.value) })} /><button onClick={() => onPickTarget(draft.targetType)} type="button"><Folder size={16} />选择</button></div>}</label>
+          <label className="wide">图标<div className="inline-input"><input value={draft.iconPath ?? ""} onChange={(event) => onChange({ ...draft, iconPath: event.target.value })} placeholder="自动提取，或手动选择图片/exe/lnk" /><button onClick={onPickIcon} type="button"><AppWindow size={16} />选择</button></div></label>
         </div>
-        <footer className={onDelete ? "split-footer" : ""}>
-          {onDelete ? <button className="danger" onClick={onDelete} type="button"><Trash2 size={16} />删除</button> : null}
-          <div className="footer-actions">
-            <button className="ghost" onClick={onClose} type="button">取消</button>
-            <button className="primary" onClick={onSubmit} type="button">保存</button>
-          </div>
-        </footer>
+        <footer className={onDelete ? "split-footer" : ""}>{onDelete ? <button className="danger" onClick={onDelete} type="button"><Trash2 size={16} />删除</button> : null}<div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>
+      </section>
+    </div>
+  );
+}
+
+interface MemoModalProps {
+  categories: Category[];
+  draft: MemoDraft;
+  folders: LauncherItem[];
+  onChange: (draft: MemoDraft) => void;
+  onClose: () => void;
+  onDelete?: () => void;
+  onSubmit: () => void;
+}
+
+function MemoModal({ categories, draft, folders, onChange, onClose, onDelete, onSubmit }: MemoModalProps) {
+  const [view, setView] = useState<"edit" | "preview">("edit");
+  const availableFolders = useMemo(
+    () => folders.filter((folder) => folder.categoryId === draft.categoryId).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh-Hans-CN")),
+    [draft.categoryId, folders],
+  );
+  return (
+    <div className="modal-backdrop">
+      <section className="modal memo-modal">
+        <header><h2>{draft.id ? "编辑备忘录" : "新建备忘录"}</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
+        <div className="memo-body">
+          <label className="memo-wide">标题<input value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} autoFocus /></label>
+          <label>分组<select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value, parentId: null, lockCategory: false })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+          <label>文件夹<select value={draft.parentId ?? ""} onChange={(event) => {
+            const parentId = event.target.value || null;
+            const folder = folders.find((item) => item.id === parentId);
+            onChange({ ...draft, parentId, categoryId: folder?.categoryId ?? draft.categoryId, lockCategory: false });
+          }}><option value="">分组根目录</option>{availableFolders.map((folder) => <option key={folder.id} value={folder.id}>{folderPathLabel(folder, folders)}</option>)}</select></label>
+          <div className="segmented memo-tabs"><button className={view === "edit" ? "active" : ""} onClick={() => setView("edit")} type="button"><FilePenLine size={16} />编辑</button><button className={view === "preview" ? "active" : ""} onClick={() => setView("preview")} type="button"><Eye size={16} />预览</button></div>
+          {view === "edit" ? <textarea aria-label="备忘录 Markdown 内容" value={draft.content} onChange={(event) => onChange({ ...draft, content: event.target.value })} placeholder="使用 Markdown 记录内容" /> : <div className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft.content || "*空白备忘录*"}</ReactMarkdown></div>}
+        </div>
+        <footer className={onDelete ? "split-footer" : ""}>{onDelete ? <button className="danger" onClick={onDelete} type="button"><Trash2 size={16} />删除</button> : null}<div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>
+      </section>
+    </div>
+  );
+}
+
+interface FolderModalProps {
+  categories: Category[];
+  draft: FolderDraft;
+  onChange: (draft: FolderDraft) => void;
+  onClose: () => void;
+  onDelete?: () => void;
+  onSubmit: () => void;
+}
+
+function FolderModal({ categories, draft, onChange, onClose, onDelete, onSubmit }: FolderModalProps) {
+  return (
+    <div className="modal-backdrop">
+      <section className="modal folder-modal">
+        <header><h2>{draft.id ? "重命名文件夹" : "新建文件夹"}</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
+        <div className="form-grid">
+          <label className="wide">名称<input autoFocus value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
+          <label className="wide">分组<select disabled={draft.lockCategory} value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+        </div>
+        <footer className={onDelete ? "split-footer" : ""}>{onDelete ? <button className="danger" onClick={onDelete} type="button"><Trash2 size={16} />删除</button> : null}<div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>
       </section>
     </div>
   );
@@ -1027,40 +1704,14 @@ interface SettingsModalProps {
   autoHideAfterLaunch: boolean;
   autoHideOnBlur: boolean;
   autoSortByLaunchCount: boolean;
-  categories: Category[];
   closeToTray: boolean;
   hotkey: string;
   launchMode: LaunchMode;
-  onAddCategory: (name: string) => void;
   onClose: () => void;
-  onDeleteCategory: (id: string) => void;
-  onReorderCategory: (activeId: string, overId: string) => void;
-  onSubmit: (
-    hotkey: string,
-    closeToTray: boolean,
-    autoStart: boolean,
-    autoHideAfterLaunch: boolean,
-    autoHideOnBlur: boolean,
-    autoSortByLaunchCount: boolean,
-    launchMode: LaunchMode,
-  ) => void;
+  onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, autoHideAfterLaunch: boolean, autoHideOnBlur: boolean, autoSortByLaunchCount: boolean, launchMode: LaunchMode) => void;
 }
 
-function SettingsModal({
-  autoStart,
-  autoHideAfterLaunch,
-  autoHideOnBlur,
-  autoSortByLaunchCount,
-  categories,
-  closeToTray,
-  hotkey,
-  launchMode,
-  onAddCategory,
-  onClose,
-  onDeleteCategory,
-  onReorderCategory,
-  onSubmit,
-}: SettingsModalProps) {
+function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, onClose, onSubmit }: SettingsModalProps) {
   const [nextHotkey, setNextHotkey] = useState(hotkey);
   const [nextCloseToTray, setNextCloseToTray] = useState(closeToTray);
   const [nextAutoStart, setNextAutoStart] = useState(autoStart);
@@ -1068,19 +1719,7 @@ function SettingsModal({
   const [nextAutoHideOnBlur, setNextAutoHideOnBlur] = useState(autoHideOnBlur);
   const [nextAutoSortByLaunchCount, setNextAutoSortByLaunchCount] = useState(autoSortByLaunchCount);
   const [nextLaunchMode, setNextLaunchMode] = useState<LaunchMode>(launchMode);
-  const [nextCategory, setNextCategory] = useState("");
   const [capturingHotkey, setCapturingHotkey] = useState(false);
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
-
-  function submitCategory() {
-    const name = nextCategory.trim();
-    if (!name) return;
-    onAddCategory(name);
-    setNextCategory("");
-  }
 
   function captureHotkey(event: React.KeyboardEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -1090,159 +1729,26 @@ function SettingsModal({
       return;
     }
     if (["Control", "Shift", "Alt", "Meta"].includes(key)) return;
-    const parts = [
-      event.ctrlKey ? "Ctrl" : "",
-      event.altKey ? "Alt" : "",
-      event.shiftKey ? "Shift" : "",
-      event.metaKey ? "Super" : "",
-      key.length === 1 ? key.toUpperCase() : key,
-    ].filter(Boolean);
+    const parts = [event.ctrlKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : "", event.metaKey ? "Super" : "", key.length === 1 ? key.toUpperCase() : key].filter(Boolean);
     setNextHotkey(parts.join("+") || "Ctrl+Space");
     setCapturingHotkey(false);
-  }
-
-  function handleCategoryDragEnd(event: DragEndEvent) {
-    const activeId = String(event.active.id);
-    const overId = event.over ? String(event.over.id) : "";
-    if (overId && activeId !== overId) {
-      onReorderCategory(activeId, overId);
-    }
   }
 
   return (
     <div className="modal-backdrop">
       <section className="modal settings-modal">
-        <header>
-          <h2>设置</h2>
-          <button onClick={onClose} title="关闭" type="button"><X size={18} /></button>
-        </header>
+        <header><h2>设置</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="settings-body">
-          <label className="check-row">
-            <input checked={nextAutoStart} onChange={(event) => setNextAutoStart(event.target.checked)} type="checkbox" />
-            开机启动
-          </label>
-          <label className="check-row">
-            <input checked={nextCloseToTray} onChange={(event) => setNextCloseToTray(event.target.checked)} type="checkbox" />
-            关闭窗口时最小化到托盘
-          </label>
-          <label className="check-row">
-            <input checked={nextAutoHideAfterLaunch} onChange={(event) => setNextAutoHideAfterLaunch(event.target.checked)} type="checkbox" />
-            运行程序后自动关闭主窗口
-          </label>
-          <label className="check-row">
-            <input checked={nextAutoHideOnBlur} onChange={(event) => setNextAutoHideOnBlur(event.target.checked)} type="checkbox" />
-            失去焦点后关闭主窗口
-          </label>
-          <label className="check-row">
-            <input checked={nextAutoSortByLaunchCount} onChange={(event) => setNextAutoSortByLaunchCount(event.target.checked)} type="checkbox" />
-            按打开次数自动排序
-          </label>
-          <label>
-            <span>启动方式</span>
-            <div className="segmented">
-              <button className={nextLaunchMode === "single" ? "active" : ""} onClick={() => setNextLaunchMode("single")} type="button">单击启动</button>
-              <button className={nextLaunchMode === "double" ? "active" : ""} onClick={() => setNextLaunchMode("double")} type="button">双击启动</button>
-            </div>
-          </label>
-          <label>
-            <span><Keyboard size={17} /> 全局热键</span>
-            <button
-              className={`hotkey-capture ${capturingHotkey ? "capturing" : ""}`}
-              onBlur={() => setCapturingHotkey(false)}
-              onClick={() => setCapturingHotkey(true)}
-              onKeyDown={captureHotkey}
-              type="button"
-            >
-              {capturingHotkey ? "请按下快捷键..." : nextHotkey || "Ctrl+Space"}
-            </button>
-          </label>
-        <section className="settings-section">
-          <div className="settings-section-title">
-            <strong>分类管理</strong>
-            <span>{categories.length} 个分类</span>
-          </div>
-          <div className="settings-category-create">
-            <input
-              aria-label="新分类名称"
-              onChange={(event) => setNextCategory(event.target.value)}
-              onKeyDown={(event) => event.key === "Enter" && submitCategory()}
-              placeholder="新分类名称"
-              value={nextCategory}
-            />
-            <button onClick={submitCategory} type="button"><Plus size={16} />添加</button>
-          </div>
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleCategoryDragEnd}>
-            <SortableContext items={categories.map((category) => category.id)} strategy={verticalListSortingStrategy}>
-              <div className="settings-category-list">
-                {categories.map((category) => (
-                  <SortableCategoryRow
-                    category={category}
-                    disabledDelete={categories.length <= 1}
-                    key={category.id}
-                    onDelete={() => onDeleteCategory(category.id)}
-                  />
-                ))}
-              </div>
-            </SortableContext>
-          </DndContext>
-        </section>
+          <label className="check-row"><input checked={nextAutoStart} onChange={(event) => setNextAutoStart(event.target.checked)} type="checkbox" />开机启动</label>
+          <label className="check-row"><input checked={nextCloseToTray} onChange={(event) => setNextCloseToTray(event.target.checked)} type="checkbox" />关闭窗口时最小化到托盘</label>
+          <label className="check-row"><input checked={nextAutoHideAfterLaunch} onChange={(event) => setNextAutoHideAfterLaunch(event.target.checked)} type="checkbox" />运行程序后自动关闭主窗口</label>
+          <label className="check-row"><input checked={nextAutoHideOnBlur} onChange={(event) => setNextAutoHideOnBlur(event.target.checked)} type="checkbox" />失去焦点后关闭主窗口</label>
+          <label className="check-row"><input checked={nextAutoSortByLaunchCount} onChange={(event) => setNextAutoSortByLaunchCount(event.target.checked)} type="checkbox" />按打开次数自动排序</label>
+          <label><span>启动方式</span><div className="segmented"><button className={nextLaunchMode === "single" ? "active" : ""} onClick={() => setNextLaunchMode("single")} type="button">单击启动</button><button className={nextLaunchMode === "double" ? "active" : ""} onClick={() => setNextLaunchMode("double")} type="button">双击启动</button></div></label>
+          <label><span><Keyboard size={17} />全局热键</span><button className={`hotkey-capture ${capturingHotkey ? "capturing" : ""}`} onBlur={() => setCapturingHotkey(false)} onClick={() => setCapturingHotkey(true)} onKeyDown={captureHotkey} type="button">{capturingHotkey ? "请按下快捷键..." : nextHotkey || "Ctrl+Space"}</button></label>
         </div>
-        <footer>
-          <button className="ghost" onClick={onClose} type="button">取消</button>
-          <button
-            className="primary"
-            onClick={() =>
-              onSubmit(
-                nextHotkey.trim() || "Ctrl+Space",
-                nextCloseToTray,
-                nextAutoStart,
-                nextAutoHideAfterLaunch,
-                nextAutoHideOnBlur,
-                nextAutoSortByLaunchCount,
-                nextLaunchMode,
-              )
-            }
-            type="button"
-          >
-            保存
-          </button>
-        </footer>
+        <footer className="settings-footer"><span className="settings-version">版本 {APP_VERSION}</span><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextLaunchMode)} type="button">保存</button></div></footer>
       </section>
-    </div>
-  );
-}
-
-interface SortableCategoryRowProps {
-  category: Category;
-  disabledDelete: boolean;
-  onDelete: () => void;
-}
-
-function SortableCategoryRow({ category, disabledDelete, onDelete }: SortableCategoryRowProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: category.id });
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
-  return (
-    <div
-      className={`settings-category-row ${isDragging ? "drag-sorting" : ""}`}
-      ref={setNodeRef}
-      style={style}
-      {...attributes}
-      {...listeners}
-    >
-      <i style={{ background: category.color }} />
-      <span>{category.name}</span>
-      <button
-        disabled={disabledDelete}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={onDelete}
-        title={disabledDelete ? "至少保留一个分类" : "删除分类"}
-        type="button"
-      >
-        <Trash2 size={15} />
-      </button>
     </div>
   );
 }

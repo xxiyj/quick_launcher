@@ -1,5 +1,6 @@
-export type TargetType = "program" | "shortcut" | "folder";
+export type TargetType = "program" | "shortcut" | "folder" | "url";
 export type LaunchMode = "single" | "double";
+export type ItemKind = "launcher" | "memo" | "workspaceFolder";
 
 export interface WindowSize {
   width: number;
@@ -15,11 +16,13 @@ export interface Category {
 
 export interface LauncherItem {
   id: string;
+  kind: ItemKind;
   name: string;
   path: string;
-  args: string;
-  targetType: TargetType;
+  args?: string;
+  targetType?: TargetType;
   categoryId: string;
+  parentId?: string | null;
   iconPath?: string;
   searchKey: string;
   order: number;
@@ -36,6 +39,7 @@ export interface LauncherSettings {
   autoHideOnBlur: boolean;
   autoSortByLaunchCount: boolean;
   launchMode: LaunchMode;
+  defaultMemoCategoryId?: string;
   windowSize?: WindowSize;
 }
 
@@ -66,5 +70,10 @@ export interface ItemDraft {
   args: string;
   targetType: TargetType;
   categoryId: string;
+  parentId?: string | null;
   iconPath?: string;
+}
+
+export interface WorkspacePathResult {
+  path: string;
 }
