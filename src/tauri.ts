@@ -27,6 +27,7 @@ export async function loadData(): Promise<DataEnvelope> {
           autoHideAfterLaunch: true,
           autoHideOnBlur: true,
           autoSortByLaunchCount: true,
+          showCardMeta: true,
           launchMode: "single",
           defaultMemoCategoryId: "work",
         },

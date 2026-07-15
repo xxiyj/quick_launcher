@@ -270,15 +270,14 @@ button {
   min-width: 0;
 }
 
+.sidebar-category-edit,
 .sidebar-category-delete {
   position: absolute;
   top: 6px;
-  right: 6px;
   display: grid;
   width: 30px;
   height: 30px;
   place-items: center;
-  color: #c73636;
   border-radius: 8px;
   background: transparent;
   opacity: 0;
@@ -286,15 +285,31 @@ button {
   transition: opacity 0.15s ease, background 0.15s ease;
 }
 
+.sidebar-category-edit {
+  right: 40px;
+  color: #536077;
+}
+
+.sidebar-category-delete {
+  right: 6px;
+  color: #c73636;
+}
+
+.sidebar-category-row:hover .sidebar-category-edit,
+.sidebar-category-row:focus-within .sidebar-category-edit,
 .sidebar-category-row:hover .sidebar-category-delete:not(:disabled),
 .sidebar-category-row:focus-within .sidebar-category-delete:not(:disabled) {
   opacity: 1;
   pointer-events: auto;
 }
 
-.sidebar-category-row:not(.delete-disabled):hover .sidebar-category-main b,
-.sidebar-category-row:not(.delete-disabled):focus-within .sidebar-category-main b {
+.sidebar-category-row:hover .sidebar-category-main b,
+.sidebar-category-row:focus-within .sidebar-category-main b {
   opacity: 0;
+}
+
+.sidebar-category-edit:hover {
+  background: rgba(47, 128, 237, 0.1);
 }
 
 .sidebar-category-delete:hover:not(:disabled) {
@@ -706,6 +721,12 @@ button {
   background: rgba(15, 23, 42, 0.34);
 }
 
+.confirm-backdrop {
+  z-index: 40;
+  background: rgba(15, 23, 42, 0.46);
+  backdrop-filter: blur(3px);
+}
+
 .drop-overlay {
   position: fixed;
   inset: 22px;
@@ -808,6 +829,39 @@ button {
 
 .modal footer .danger:hover {
   background: rgba(199, 54, 54, 0.12);
+}
+
+.confirm-modal {
+  width: min(440px, 100%);
+  grid-template-rows: auto auto auto;
+}
+
+.confirm-body {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  padding: 24px 20px;
+}
+
+.confirm-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: #c73636;
+  border-radius: 8px;
+  background: rgba(199, 54, 54, 0.1);
+}
+
+.confirm-body p {
+  margin: 7px 0 0;
+  color: #536077;
+  line-height: 1.6;
+}
+
+.confirm-delete {
+  min-width: 86px;
 }
 
 .form-grid {

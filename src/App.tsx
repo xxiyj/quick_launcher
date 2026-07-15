@@ -67,7 +67,7 @@ import {
   updateHotkey,
   updateStartup,
 } from "./tauri";
-import type { Category, ItemDraft, ItemKind, LauncherData, LauncherItem, LaunchMode, TargetType } from "./types";
+import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, TargetType } from "./types";
 
 const COLORS = ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0", "#00a3a3"];
 const APP_VERSION = packageJson.version.replace(/\.0$/, "");
@@ -104,6 +104,13 @@ interface FolderDraft {
   createdAt?: string;
 }
 
+interface DeleteConfirmation {
+  kind: "category" | "node";
+  targetId: string;
+  title: string;
+  description: string;
+}
+
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 }
@@ -125,6 +132,7 @@ function defaultData(): LauncherData {
       autoHideAfterLaunch: true,
       autoHideOnBlur: true,
       autoSortByLaunchCount: true,
+      showCardMeta: true,
       launchMode: "single",
       defaultMemoCategoryId: "default",
     },
@@ -257,6 +265,7 @@ export default function App() {
   const [draft, setDraft] = useState<ItemDraft | null>(null);
   const [memoDraft, setMemoDraft] = useState<MemoDraft | null>(null);
   const [folderDraft, setFolderDraft] = useState<FolderDraft | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -279,7 +288,7 @@ export default function App() {
     () => data.items.find((item) => item.id === currentFolderId && item.kind === "workspaceFolder"),
     [currentFolderId, data.items],
   );
-  const modalOpen = Boolean(draft || memoDraft || folderDraft || settingsOpen);
+  const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen);
 
   useEffect(() => {
     loadData()
@@ -786,21 +795,30 @@ export default function App() {
     setStatus("分组名称已更新");
   }
 
-  function deleteCategory(id: string) {
+  function requestDeleteCategory(id: string) {
     if (data.categories.length <= 1) {
       setStatus("至少保留一个分组");
       return;
     }
-    const fallback = categories.find((category) => category.id !== id)?.id ?? "default";
     const category = categories.find((value) => value.id === id);
-    const fallbackName = categories.find((value) => value.id === fallback)?.name ?? "其他分组";
+    if (!category) return;
     const itemCount = data.items.filter((item) => item.categoryId === id).length;
-    if (!window.confirm(`确定删除分组「${category?.name ?? "该分组"}」吗？其中 ${itemCount} 项内容将归入「${fallbackName}」。`)) return;
+    setDeleteConfirmation({
+      kind: "category",
+      targetId: id,
+      title: "删除分组",
+      description: `删除「${category.name}」后，其中 ${itemCount} 项内容将移入「全部」。`,
+    });
+  }
+
+  function deleteCategory(id: string) {
+    if (data.categories.length <= 1 || !categories.some((category) => category.id === id)) return;
+    const fallback = categories.find((category) => category.id !== id)?.id ?? "default";
     persist((current) => ({
       ...current,
       categories: current.categories.filter((category) => category.id !== id),
       items: current.items.map((item) =>
-        item.categoryId === id ? { ...item, categoryId: fallback, updatedAt: new Date().toISOString() } : item,
+        item.categoryId === id ? { ...item, categoryId: "all", updatedAt: new Date().toISOString() } : item,
       ),
       settings: {
         ...current.settings,
@@ -1075,9 +1093,15 @@ export default function App() {
     }
   }
 
+  function requestRemoveNode(item: LauncherItem) {
+    const title = item.kind === "workspaceFolder" ? "删除文件夹" : item.kind === "memo" ? "删除备忘录" : "删除启动项";
+    const description = item.kind === "workspaceFolder"
+      ? `将删除「${item.name}」及其所有内容。受管理的文件会移入回收站。`
+      : `将删除「${item.name}」。受管理的文件会移入回收站。`;
+    setDeleteConfirmation({ kind: "node", targetId: item.id, title, description });
+  }
+
   async function removeNode(item: LauncherItem) {
-    const label = item.kind === "workspaceFolder" ? "文件夹及其内容" : item.name;
-    if (!window.confirm(`确定删除「${label}」吗？受管理的文件会移入回收站。`)) return;
     try {
       await recycleWorkspacePath(item.path);
       const removedIds = item.kind === "workspaceFolder" ? collectDescendantIds(data.items, item.id) : new Set([item.id]);
@@ -1090,6 +1114,18 @@ export default function App() {
     } catch (error) {
       setStatus(`删除失败：${String(error)}`);
     }
+  }
+
+  async function confirmDelete() {
+    const confirmation = deleteConfirmation;
+    if (!confirmation) return;
+    setDeleteConfirmation(null);
+    if (confirmation.kind === "category") {
+      deleteCategory(confirmation.targetId);
+      return;
+    }
+    const item = data.items.find((node) => node.id === confirmation.targetId);
+    if (item) await removeNode(item);
   }
 
   async function runItem(item: LauncherItem) {
@@ -1119,6 +1155,7 @@ export default function App() {
     autoHideAfterLaunch: boolean,
     autoHideOnBlur: boolean,
     autoSortByLaunchCount: boolean,
+    showCardMeta: boolean,
     launchMode: LaunchMode,
   ) {
     try {
@@ -1135,6 +1172,7 @@ export default function App() {
           autoHideAfterLaunch,
           autoHideOnBlur,
           autoSortByLaunchCount,
+          showCardMeta,
           launchMode,
         },
       }));
@@ -1163,7 +1201,7 @@ export default function App() {
             categories={categories}
             categoryCounts={categoryCounts}
             onAddCategory={addCategory}
-            onDeleteCategory={deleteCategory}
+            onDeleteCategory={requestDeleteCategory}
             onOpenSettings={() => setSettingsOpen(true)}
             onRenameCategory={renameCategory}
             onReorderCategory={reorderCategories}
@@ -1204,10 +1242,11 @@ export default function App() {
               <section className={`grid ${query.trim() || data.settings.autoSortByLaunchCount ? "sorting-disabled" : ""}`} aria-label="启动项列表">
                 {visibleItems.map((item) => (
                   <SortableAppCard
-                    categoryName={categories.find((category) => category.id === item.categoryId)?.name ?? "未分组"}
+                    categoryName={item.categoryId === "all" ? "全部" : categories.find((category) => category.id === item.categoryId)?.name ?? "未分组"}
                     item={item}
                     key={item.id}
                     launchMode={data.settings.launchMode}
+                    showCardMeta={data.settings.showCardMeta}
                     onEdit={() => {
                       if (item.kind === "workspaceFolder") openFolderEditor(item);
                       else if (item.kind === "memo") void openMemo(item);
@@ -1249,7 +1288,7 @@ export default function App() {
           onClose={() => setDraft(null)}
           onDelete={draft.id ? () => {
             const item = data.items.find((node) => node.id === draft.id);
-            if (item) void removeNode(item);
+            if (item) requestRemoveNode(item);
           } : undefined}
           onPickIcon={pickIcon}
           onPickTarget={pickTarget}
@@ -1266,7 +1305,7 @@ export default function App() {
           onClose={() => setMemoDraft(null)}
           onDelete={memoDraft.id ? () => {
             const item = data.items.find((node) => node.id === memoDraft.id);
-            if (item) void removeNode(item);
+            if (item) requestRemoveNode(item);
           } : undefined}
           onSubmit={() => void submitMemoDraft()}
         />
@@ -1280,7 +1319,7 @@ export default function App() {
           onClose={() => setFolderDraft(null)}
           onDelete={folderDraft.id ? () => {
             const item = data.items.find((node) => node.id === folderDraft.id);
-            if (item) void removeNode(item);
+            if (item) requestRemoveNode(item);
           } : undefined}
           onSubmit={() => void submitFolderDraft()}
         />
@@ -1295,8 +1334,17 @@ export default function App() {
           closeToTray={data.settings.closeToTray}
           hotkey={data.settings.hotkey}
           launchMode={data.settings.launchMode}
+          showCardMeta={data.settings.showCardMeta}
           onClose={() => setSettingsOpen(false)}
           onSubmit={saveSettings}
+        />
+      ) : null}
+
+      {deleteConfirmation ? (
+        <DeleteConfirmModal
+          confirmation={deleteConfirmation}
+          onCancel={() => setDeleteConfirmation(null)}
+          onConfirm={() => void confirmDelete()}
         />
       ) : null}
 
@@ -1308,6 +1356,27 @@ export default function App() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+interface DeleteConfirmModalProps {
+  confirmation: DeleteConfirmation;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function DeleteConfirmModal({ confirmation, onCancel, onConfirm }: DeleteConfirmModalProps) {
+  return (
+    <div className="modal-backdrop confirm-backdrop">
+      <section aria-labelledby="delete-confirm-title" aria-modal="true" className="modal confirm-modal" role="alertdialog">
+        <header><h2 id="delete-confirm-title">{confirmation.title}</h2><button aria-label="关闭确认" onClick={onCancel} title="取消" type="button"><X size={18} /></button></header>
+        <div className="confirm-body">
+          <span aria-hidden="true" className="confirm-icon"><Trash2 size={20} /></span>
+          <p>{confirmation.description}</p>
+        </div>
+        <footer><button className="ghost" onClick={onCancel} type="button">取消</button><button className="danger confirm-delete" onClick={onConfirm} type="button"><Trash2 size={16} />删除</button></footer>
+      </section>
+    </div>
   );
 }
 
@@ -1357,7 +1426,7 @@ function SidebarCategoryList({ allCount, allSelected, categories, categoryCounts
       <div className="sidebar-all-row">
         <button className={`category ${allSelected ? "active" : ""}`} onClick={onSelectAll} type="button">
           <Grid2X2 size={18} />
-          <span>全部应用</span>
+          <span>全部</span>
           <b>{allCount}</b>
         </button>
         <button aria-label="新建分组" className="sidebar-add-category" disabled={addingCategory} onClick={() => setAddingCategory(true)} title="新建分组" type="button"><Plus size={18} /></button>
@@ -1433,9 +1502,7 @@ function SortableSidebarCategory({ category, count, disabledDelete, onDelete, on
     if (!editing) setName(category.name);
   }, [category.name, editing]);
 
-  function startEditing(event: ReactMouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    event.stopPropagation();
+  function startEditing() {
     setName(category.name);
     setEditing(true);
   }
@@ -1452,7 +1519,7 @@ function SortableSidebarCategory({ category, count, disabledDelete, onDelete, on
   }
 
   return (
-    <div className={`sidebar-category-row ${selected ? "active" : ""} ${disabledDelete ? "delete-disabled" : ""} ${isDragging ? "drag-sorting" : ""}`} ref={setNodeRef} style={style} {...attributes} {...listeners}>
+    <div className={`sidebar-category-row ${selected ? "active" : ""} ${isDragging ? "drag-sorting" : ""}`} ref={setNodeRef} style={style} {...attributes} {...listeners}>
       {editing ? (
         <div className="sidebar-category-editor">
           <i style={{ background: category.color }} />
@@ -1477,11 +1544,22 @@ function SortableSidebarCategory({ category, count, disabledDelete, onDelete, on
         </div>
       ) : (
         <>
-          <button className={`category sidebar-category-main ${selected ? "active" : ""}`} onClick={onSelect} onDoubleClick={startEditing} title="双击修改分组名称" type="button">
+          <button className={`category sidebar-category-main ${selected ? "active" : ""}`} onClick={onSelect} type="button">
             <i style={{ background: category.color }} />
             <span>{category.name}</span>
             <b>{count}</b>
           </button>
+          <button
+            aria-label={`编辑分组 ${category.name}`}
+            className="sidebar-category-edit"
+            onClick={(event) => {
+              event.stopPropagation();
+              startEditing();
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            title="编辑分组名称"
+            type="button"
+          ><Edit3 size={15} /></button>
           <button
             aria-label={`删除分组 ${category.name}`}
             className="sidebar-category-delete"
@@ -1504,13 +1582,14 @@ interface SortableAppCardProps {
   categoryName: string;
   item: LauncherItem;
   launchMode: LaunchMode;
+  showCardMeta: boolean;
   onEdit: () => void;
   onOpenFolder: () => void;
   onOpenMemo: () => void;
   onRun: () => void;
 }
 
-function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onRun }: SortableAppCardProps) {
+function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onRun, showCardMeta }: SortableAppCardProps) {
   const folder = item.kind === "workspaceFolder";
   const sortable = useSortable({ id: item.id, disabled: folder });
   const droppable = useDroppable({ id: `folder-drop-${item.id}`, disabled: !folder });
@@ -1547,7 +1626,7 @@ function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder,
       <button className="app-main" onClick={activate} type="button">
         <span className="app-icon">{icon}</span>
         <span className="app-name">{item.name}</span>
-        <span className="app-meta">{itemLabel(item)}<i />{categoryName}</span>
+        {showCardMeta ? <span className="app-meta">{itemLabel(item)}<i />{categoryName}</span> : null}
       </button>
       <div className="card-tools">
         <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title={folder ? "重命名" : item.kind === "memo" ? "编辑备忘录" : "编辑"} type="button"><Edit3 size={16} /></button>
@@ -1621,7 +1700,7 @@ function ItemModal({ categories, draft, folders, onChange, onClose, onDelete, on
         <header><h2>{draft.id ? "编辑启动项" : "添加启动项"}</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="form-grid">
           <label className="wide">名称<input value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
-          <label>分组<select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value, parentId: null })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+          <label>分组<select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value, parentId: null })}>{draft.categoryId === "all" ? <option value="all">全部</option> : null}{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
           <label>文件夹<select value={draft.parentId ?? ""} onChange={(event) => {
             const parentId = event.target.value || null;
             const folder = folders.find((item) => item.id === parentId);
@@ -1660,7 +1739,7 @@ function MemoModal({ categories, draft, folders, onChange, onClose, onDelete, on
         <header><h2>{draft.id ? "编辑备忘录" : "新建备忘录"}</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="memo-body">
           <label className="memo-wide">标题<input value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} autoFocus /></label>
-          <label>分组<select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value, parentId: null, lockCategory: false })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+          <label>分组<select value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value, parentId: null, lockCategory: false })}>{draft.categoryId === "all" ? <option value="all">全部</option> : null}{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
           <label>文件夹<select value={draft.parentId ?? ""} onChange={(event) => {
             const parentId = event.target.value || null;
             const folder = folders.find((item) => item.id === parentId);
@@ -1691,7 +1770,7 @@ function FolderModal({ categories, draft, onChange, onClose, onDelete, onSubmit 
         <header><h2>{draft.id ? "重命名文件夹" : "新建文件夹"}</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="form-grid">
           <label className="wide">名称<input autoFocus value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
-          <label className="wide">分组<select disabled={draft.lockCategory} value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+          <label className="wide">分组<select disabled={draft.lockCategory} value={draft.categoryId} onChange={(event) => onChange({ ...draft, categoryId: event.target.value })}>{draft.categoryId === "all" ? <option value="all">全部</option> : null}{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
         </div>
         <footer className={onDelete ? "split-footer" : ""}>{onDelete ? <button className="danger" onClick={onDelete} type="button"><Trash2 size={16} />删除</button> : null}<div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>
       </section>
@@ -1704,20 +1783,22 @@ interface SettingsModalProps {
   autoHideAfterLaunch: boolean;
   autoHideOnBlur: boolean;
   autoSortByLaunchCount: boolean;
+  showCardMeta: boolean;
   closeToTray: boolean;
   hotkey: string;
   launchMode: LaunchMode;
   onClose: () => void;
-  onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, autoHideAfterLaunch: boolean, autoHideOnBlur: boolean, autoSortByLaunchCount: boolean, launchMode: LaunchMode) => void;
+  onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, autoHideAfterLaunch: boolean, autoHideOnBlur: boolean, autoSortByLaunchCount: boolean, showCardMeta: boolean, launchMode: LaunchMode) => void;
 }
 
-function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, onClose, onSubmit }: SettingsModalProps) {
+function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, onClose, onSubmit, showCardMeta }: SettingsModalProps) {
   const [nextHotkey, setNextHotkey] = useState(hotkey);
   const [nextCloseToTray, setNextCloseToTray] = useState(closeToTray);
   const [nextAutoStart, setNextAutoStart] = useState(autoStart);
   const [nextAutoHideAfterLaunch, setNextAutoHideAfterLaunch] = useState(autoHideAfterLaunch);
   const [nextAutoHideOnBlur, setNextAutoHideOnBlur] = useState(autoHideOnBlur);
   const [nextAutoSortByLaunchCount, setNextAutoSortByLaunchCount] = useState(autoSortByLaunchCount);
+  const [nextShowCardMeta, setNextShowCardMeta] = useState(showCardMeta);
   const [nextLaunchMode, setNextLaunchMode] = useState<LaunchMode>(launchMode);
   const [capturingHotkey, setCapturingHotkey] = useState(false);
 
@@ -1744,10 +1825,11 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
           <label className="check-row"><input checked={nextAutoHideAfterLaunch} onChange={(event) => setNextAutoHideAfterLaunch(event.target.checked)} type="checkbox" />运行程序后自动关闭主窗口</label>
           <label className="check-row"><input checked={nextAutoHideOnBlur} onChange={(event) => setNextAutoHideOnBlur(event.target.checked)} type="checkbox" />失去焦点后关闭主窗口</label>
           <label className="check-row"><input checked={nextAutoSortByLaunchCount} onChange={(event) => setNextAutoSortByLaunchCount(event.target.checked)} type="checkbox" />按打开次数自动排序</label>
+          <label className="check-row"><input checked={nextShowCardMeta} onChange={(event) => setNextShowCardMeta(event.target.checked)} type="checkbox" />显示卡片分组与类型</label>
           <label><span>启动方式</span><div className="segmented"><button className={nextLaunchMode === "single" ? "active" : ""} onClick={() => setNextLaunchMode("single")} type="button">单击启动</button><button className={nextLaunchMode === "double" ? "active" : ""} onClick={() => setNextLaunchMode("double")} type="button">双击启动</button></div></label>
           <label><span><Keyboard size={17} />全局热键</span><button className={`hotkey-capture ${capturingHotkey ? "capturing" : ""}`} onBlur={() => setCapturingHotkey(false)} onClick={() => setCapturingHotkey(true)} onKeyDown={captureHotkey} type="button">{capturingHotkey ? "请按下快捷键..." : nextHotkey || "Ctrl+Space"}</button></label>
         </div>
-        <footer className="settings-footer"><span className="settings-version">版本 {APP_VERSION}</span><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextLaunchMode)} type="button">保存</button></div></footer>
+        <footer className="settings-footer"><span className="settings-version">版本 {APP_VERSION}</span><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode)} type="button">保存</button></div></footer>
       </section>
     </div>
   );

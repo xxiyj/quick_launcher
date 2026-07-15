@@ -106,6 +106,8 @@ struct LauncherSettings {
     auto_hide_on_blur: bool,
     #[serde(default = "default_true")]
     auto_sort_by_launch_count: bool,
+    #[serde(default = "default_true")]
+    show_card_meta: bool,
     #[serde(default = "default_launch_mode")]
     launch_mode: LaunchMode,
     #[serde(default)]
@@ -185,6 +187,7 @@ struct AppState {
 
 const SHORTCUT_DEBOUNCE: Duration = Duration::from_millis(350);
 const BLUR_HIDE_SUPPRESSION: Duration = Duration::from_millis(1500);
+const ALL_CATEGORY_ID: &str = "all";
 
 fn main() {
     tauri::Builder::default()
@@ -287,6 +290,7 @@ fn default_data() -> LauncherData {
             auto_hide_after_launch: true,
             auto_hide_on_blur: true,
             auto_sort_by_launch_count: true,
+            show_card_meta: true,
             launch_mode: LaunchMode::Single,
             default_memo_category_id: "default".into(),
             window_size: None,
@@ -357,10 +361,11 @@ fn normalize_data(data: &mut LauncherData) {
     }
 
     for item in &mut data.items {
-        if !data
-            .categories
-            .iter()
-            .any(|category| category.id == item.category_id)
+        if item.category_id != ALL_CATEGORY_ID
+            && !data
+                .categories
+                .iter()
+                .any(|category| category.id == item.category_id)
         {
             item.category_id = fallback_category.clone();
         }
@@ -1496,6 +1501,7 @@ mod tests {
 
         assert_eq!(data.version, 2);
         assert_eq!(data.settings.default_memo_category_id, "current");
+        assert!(data.settings.show_card_meta);
         assert_eq!(data.items[0].kind, ItemKind::Launcher);
         assert_eq!(data.items[0].parent_id, None);
         assert_eq!(data.items[0].category_id, "current");
@@ -1503,6 +1509,43 @@ mod tests {
             data.items[0].target_type,
             Some(TargetType::Program)
         ));
+    }
+
+    #[test]
+    fn virtual_all_category_is_preserved() {
+        let mut data: LauncherData = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "categories": [{ "id": "current", "name": "当前", "color": "#2f80ed", "order": 0 }],
+            "items": [{
+                "id": "ungrouped",
+                "kind": "launcher",
+                "name": "Ungrouped App",
+                "path": "C:\\Tools\\ungrouped.exe",
+                "args": "",
+                "targetType": "program",
+                "categoryId": "all",
+                "parentId": null,
+                "searchKey": "ungrouped",
+                "order": 0,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z"
+            }],
+            "settings": {
+                "hotkey": "Ctrl+Space",
+                "closeToTray": true,
+                "autoStart": false,
+                "autoHideAfterLaunch": true,
+                "autoHideOnBlur": true,
+                "autoSortByLaunchCount": true,
+                "launchMode": "single",
+                "defaultMemoCategoryId": "current"
+            }
+        }))
+        .unwrap();
+
+        normalize_data(&mut data);
+
+        assert_eq!(data.items[0].category_id, ALL_CATEGORY_ID);
     }
 
     #[test]

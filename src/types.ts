@@ -38,6 +38,7 @@ export interface LauncherSettings {
   autoHideAfterLaunch: boolean;
   autoHideOnBlur: boolean;
   autoSortByLaunchCount: boolean;
+  showCardMeta: boolean;
   launchMode: LaunchMode;
   defaultMemoCategoryId?: string;
   windowSize?: WindowSize;
