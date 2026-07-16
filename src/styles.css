@@ -561,6 +561,11 @@ button {
   transform: translateY(-1px);
 }
 
+.app-card.has-schedule,
+.app-card.has-schedule .app-main {
+  min-height: 148px;
+}
+
 .drag-sorting {
   z-index: 5;
   opacity: 0.86;
@@ -658,6 +663,60 @@ button {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 8px 18px rgba(24, 33, 51, 0.12);
+}
+
+.schedule-badge {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+  padding: 0 5px;
+  color: #1e5ba8;
+  border: 1px solid rgba(47, 128, 237, 0.24);
+  border-radius: 6px;
+  background: rgba(47, 128, 237, 0.1);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.card-context-menu {
+  position: fixed;
+  z-index: 50;
+  display: grid;
+  width: 210px;
+  padding: 6px;
+  border: 1px solid rgba(24, 33, 51, 0.1);
+  border-radius: 8px;
+  background: #fbfcfe;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
+}
+
+.card-context-menu button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  gap: 9px;
+  width: 100%;
+  padding: 0 10px;
+  color: #536077;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.card-context-menu button:hover {
+  color: #182133;
+  background: rgba(47, 128, 237, 0.09);
+}
+
+.context-menu-divider {
+  height: 1px;
+  margin: 5px 6px;
+  background: rgba(24, 33, 51, 0.09);
 }
 
 .empty {
@@ -1102,6 +1161,158 @@ button {
   width: min(480px, 100%);
 }
 
+.schedule-modal {
+  width: min(540px, 100%);
+}
+
+.schedule-body {
+  display: grid;
+  gap: 20px;
+  min-height: 0;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.schedule-fields {
+  display: grid;
+  gap: 18px;
+}
+
+.schedule-fields.disabled {
+  opacity: 0.56;
+}
+
+.schedule-field {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  color: #536077;
+  font-size: 13px;
+}
+
+.interval-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.interval-presets button {
+  min-height: 38px;
+  color: #536077;
+  border: 1px solid rgba(24, 33, 51, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  white-space: nowrap;
+}
+
+.interval-presets button:hover:not(:disabled) {
+  color: #182133;
+  border-color: rgba(47, 128, 237, 0.38);
+  background: #f7faff;
+}
+
+.interval-presets button.active {
+  color: #1e5ba8;
+  border-color: rgba(47, 128, 237, 0.5);
+  background: rgba(47, 128, 237, 0.11);
+}
+
+.schedule-minutes-input {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 132px) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-minutes-input input,
+.schedule-time-row input {
+  height: 40px;
+  min-width: 0;
+  padding: 0 10px;
+  color: #182133;
+  border: 1px solid rgba(24, 33, 51, 0.1);
+  border-radius: 6px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.daily-times-field {
+  align-items: start;
+}
+
+.weekly-days-field {
+  align-items: start;
+}
+
+.weekday-picker {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.weekday-picker button {
+  min-height: 38px;
+  color: #536077;
+  border: 1px solid rgba(24, 33, 51, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  white-space: nowrap;
+}
+
+.weekday-picker button:hover:not(:disabled) {
+  color: #182133;
+  border-color: rgba(47, 128, 237, 0.38);
+  background: #f7faff;
+}
+
+.weekday-picker button.active {
+  color: #1e5ba8;
+  border-color: rgba(47, 128, 237, 0.5);
+  background: rgba(47, 128, 237, 0.11);
+}
+
+.weekday-picker button:disabled {
+  cursor: not-allowed;
+}
+
+.schedule-time-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schedule-time-row {
+  display: grid;
+  grid-template-columns: 116px 34px;
+  gap: 6px;
+}
+
+.schedule-time-row button,
+.schedule-add-time {
+  display: grid;
+  width: 34px;
+  height: 40px;
+  place-items: center;
+  color: #536077;
+  border: 1px solid rgba(24, 33, 51, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.schedule-time-row button:hover:not(:disabled),
+.schedule-add-time:hover:not(:disabled) {
+  color: #2f80ed;
+  border-color: rgba(47, 128, 237, 0.36);
+  background: #f7faff;
+}
+
+.schedule-time-row button:disabled,
+.schedule-add-time:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .memo-body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1357,6 +1568,8 @@ button {
 .theme-dark .memo-body input,
 .theme-dark .memo-body select,
 .theme-dark .settings-modal select,
+.theme-dark .schedule-minutes-input input,
+.theme-dark .schedule-time-row input,
 .theme-dark .memo-body textarea,
 .theme-dark .markdown-preview,
 .theme-dark .hotkey-capture {
@@ -1430,6 +1643,31 @@ button {
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.26);
 }
 
+.theme-dark .schedule-badge {
+  color: #9dc5ff;
+  border-color: rgba(104, 163, 240, 0.4);
+  background: rgba(47, 128, 237, 0.2);
+}
+
+.theme-dark .card-context-menu {
+  border-color: rgba(205, 217, 235, 0.16);
+  background: #253142;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
+}
+
+.theme-dark .card-context-menu button {
+  color: #b8c4d6;
+}
+
+.theme-dark .card-context-menu button:hover {
+  color: #f3f6fb;
+  background: rgba(104, 163, 240, 0.18);
+}
+
+.theme-dark .context-menu-divider {
+  background: rgba(205, 217, 235, 0.14);
+}
+
 .theme-dark .status button:hover,
 .theme-dark .breadcrumb button:hover,
 .theme-dark .update-link:hover:not(:disabled) {
@@ -1486,6 +1724,50 @@ button {
 .theme-dark .segmented button.active {
   background: rgba(44, 57, 75, 0.98);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.26);
+}
+
+.theme-dark .schedule-field {
+  color: #aebbd0;
+}
+
+.theme-dark .interval-presets button,
+.theme-dark .schedule-time-row button,
+.theme-dark .schedule-add-time {
+  color: #b8c4d6;
+  border-color: rgba(205, 217, 235, 0.16);
+  background: rgba(31, 41, 55, 0.94);
+}
+
+.theme-dark .interval-presets button:hover:not(:disabled),
+.theme-dark .schedule-time-row button:hover:not(:disabled),
+.theme-dark .schedule-add-time:hover:not(:disabled) {
+  color: #f3f6fb;
+  border-color: rgba(104, 163, 240, 0.44);
+  background: #293749;
+}
+
+.theme-dark .interval-presets button.active {
+  color: #9dc5ff;
+  border-color: rgba(104, 163, 240, 0.6);
+  background: rgba(47, 128, 237, 0.2);
+}
+
+.theme-dark .weekday-picker button {
+  color: #b8c4d6;
+  border-color: rgba(205, 217, 235, 0.16);
+  background: rgba(31, 41, 55, 0.94);
+}
+
+.theme-dark .weekday-picker button:hover:not(:disabled) {
+  color: #f3f6fb;
+  border-color: rgba(104, 163, 240, 0.44);
+  background: #293749;
+}
+
+.theme-dark .weekday-picker button.active {
+  color: #9dc5ff;
+  border-color: rgba(104, 163, 240, 0.6);
+  background: rgba(47, 128, 237, 0.2);
 }
 
 .theme-dark .workspace-folder-card .app-icon {

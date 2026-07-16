@@ -73,6 +73,8 @@ struct LauncherItem {
     #[serde(default)]
     parent_id: Option<String>,
     icon_path: Option<String>,
+    #[serde(default)]
+    schedule: Option<LaunchSchedule>,
     search_key: String,
     order: u32,
     #[serde(default)]
@@ -89,13 +91,48 @@ enum ItemKind {
     WorkspaceFolder,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LaunchSchedule {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_schedule_mode")]
+    mode: ScheduleMode,
+    #[serde(default = "default_schedule_interval_minutes")]
+    interval_minutes: u32,
+    #[serde(default = "default_schedule_weekdays")]
+    weekdays: Vec<u8>,
+    #[serde(default)]
+    daily_times: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ScheduleMode {
+    Interval,
+    Daily,
+}
+
 fn default_item_kind() -> ItemKind {
     ItemKind::Launcher
+}
+
+fn default_schedule_mode() -> ScheduleMode {
+    ScheduleMode::Interval
+}
+
+fn default_schedule_interval_minutes() -> u32 {
+    30
+}
+
+fn default_schedule_weekdays() -> Vec<u8> {
+    (1..=7).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LauncherSettings {
+    #[serde(default = "default_hotkey")]
     hotkey: String,
     close_to_tray: bool,
     #[serde(default)]
@@ -225,6 +262,7 @@ struct AppState {
 const SHORTCUT_DEBOUNCE: Duration = Duration::from_millis(350);
 const BLUR_HIDE_SUPPRESSION: Duration = Duration::from_millis(1500);
 const ALL_CATEGORY_ID: &str = "all";
+const DEFAULT_HOTKEY: &str = "Alt+R";
 const GITEE_LATEST_RELEASE_URL: &str =
     "https://gitee.com/api/v5/repos/capitalist/quick_launcher/releases/latest";
 const GITEE_RELEASE_DOWNLOAD_PREFIX: &str =
@@ -276,7 +314,7 @@ fn main() {
                 apply_saved_window_size(app.handle(), &data);
                 let _ = register_hotkey(app.handle(), &data.settings.hotkey);
             } else {
-                let _ = register_hotkey(app.handle(), "Ctrl+Space");
+                let _ = register_hotkey(app.handle(), DEFAULT_HOTKEY);
             }
             Ok(())
         })
@@ -295,7 +333,10 @@ fn main() {
             resolve_target,
             choose_icon,
             extract_icon,
+            store_icon,
             launch_target,
+            open_program_in_explorer,
+            open_program_in_terminal,
             check_for_update,
             install_update,
             update_hotkey,
@@ -327,7 +368,7 @@ fn default_data() -> LauncherData {
         }],
         items: vec![],
         settings: LauncherSettings {
-            hotkey: "Ctrl+Space".into(),
+            hotkey: default_hotkey(),
             close_to_tray: true,
             auto_start: false,
             auto_hide_after_launch: true,
@@ -340,6 +381,10 @@ fn default_data() -> LauncherData {
             window_size: None,
         },
     }
+}
+
+fn default_hotkey() -> String {
+    DEFAULT_HOTKEY.into()
 }
 
 fn should_ignore_shortcut(last_shortcut_at: &mut Option<Instant>, now: Instant) -> bool {
@@ -376,6 +421,29 @@ fn icons_dir(path: &Path) -> PathBuf {
         .join("icons")
 }
 
+fn relative_icon_path(data_path: &Path, icon_path: &Path) -> Option<String> {
+    let root = data_path.parent()?;
+    icon_path
+        .strip_prefix(root)
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn normalize_icon_paths(data: &mut LauncherData, data_path: &Path) {
+    for item in &mut data.items {
+        let Some(icon_path) = item.icon_path.as_ref() else {
+            continue;
+        };
+        let icon_path = PathBuf::from(sanitize_path(icon_path));
+        if !icon_path.is_absolute() {
+            continue;
+        }
+        if let Some(relative_path) = relative_icon_path(data_path, &icon_path) {
+            item.icon_path = Some(relative_path);
+        }
+    }
+}
+
 fn read_data(path: &Path) -> Result<LauncherData, String> {
     if !path.exists() {
         return Ok(default_data());
@@ -383,6 +451,7 @@ fn read_data(path: &Path) -> Result<LauncherData, String> {
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut data: LauncherData = serde_json::from_str(&text).map_err(|error| error.to_string())?;
     normalize_data(&mut data);
+    normalize_icon_paths(&mut data, path);
     Ok(data)
 }
 
@@ -413,8 +482,45 @@ fn normalize_data(data: &mut LauncherData) {
         {
             item.category_id = fallback_category.clone();
         }
+        if let Some(schedule) = item.schedule.as_mut() {
+            normalize_launch_schedule(schedule);
+        }
     }
     data.version = 2;
+}
+
+fn normalize_launch_schedule(schedule: &mut LaunchSchedule) {
+    schedule.interval_minutes = schedule.interval_minutes.clamp(1, 10_080);
+    schedule.weekdays.retain(|day| (1..=7).contains(day));
+    schedule.weekdays.sort();
+    schedule.weekdays.dedup();
+    if schedule.weekdays.is_empty() {
+        schedule.weekdays = default_schedule_weekdays();
+    }
+    schedule
+        .daily_times
+        .retain(|time| is_valid_schedule_time(time));
+    schedule.daily_times.sort();
+    schedule.daily_times.dedup();
+    if matches!(schedule.mode, ScheduleMode::Daily) && schedule.daily_times.is_empty() {
+        schedule.daily_times.push("08:00".into());
+    }
+}
+
+fn is_valid_schedule_time(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 5
+        || bytes[2] != b':'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 2 || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let hours = u8::from_str_radix(&value[..2], 10).unwrap_or(u8::MAX);
+    let minutes = u8::from_str_radix(&value[3..], 10).unwrap_or(u8::MAX);
+    hours < 24 && minutes < 60
 }
 
 fn write_data(path: &Path, data: &LauncherData) -> Result<(), String> {
@@ -830,7 +936,9 @@ fn load_data(app: AppHandle) -> Result<DataEnvelope, String> {
 #[tauri::command]
 fn save_data(app: AppHandle, mut data: LauncherData) -> Result<(), String> {
     normalize_data(&mut data);
-    write_data(&state_path(&app), &data)
+    let path = state_path(&app);
+    normalize_icon_paths(&mut data, &path);
+    write_data(&path, &data)
 }
 
 fn update_http_client() -> Result<reqwest::blocking::Client, String> {
@@ -1295,6 +1403,73 @@ fn extract_icon(app: AppHandle, path: String, item_id: String) -> Result<Option<
     }
 }
 
+fn is_image_icon_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "ico"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn icon_file_stem(item_id: &str) -> Result<String, String> {
+    let stem = item_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if stem.is_empty() {
+        Err("图标标识不能为空".into())
+    } else {
+        Ok(stem)
+    }
+}
+
+#[tauri::command]
+fn store_icon(app: AppHandle, path: String, item_id: String) -> Result<String, String> {
+    let data_path = state_path(&app);
+    let root = data_path
+        .parent()
+        .ok_or_else(|| "无法定位应用目录".to_string())?;
+    let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let requested = PathBuf::from(sanitize_path(&path));
+    let source = if requested.is_absolute() {
+        requested
+    } else {
+        root.join(requested)
+    };
+    let source = fs::canonicalize(source).map_err(|error| format!("图标文件不可用：{error}"))?;
+
+    if let Ok(relative_path) = source.strip_prefix(&root) {
+        return Ok(relative_path.to_string_lossy().to_string());
+    }
+    if !is_image_icon_file(&source) {
+        return Err("外部图标仅支持 PNG、JPG、JPEG 或 ICO 图片".into());
+    }
+
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .ok_or_else(|| "图标文件缺少扩展名".to_string())?;
+    let relative_path =
+        Path::new("icons").join(format!("{}.{}", icon_file_stem(&item_id)?, extension));
+    let output = root.join(&relative_path);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::copy(&source, &output).map_err(|error| error.to_string())?;
+    Ok(relative_path.to_string_lossy().to_string())
+}
+
 #[cfg(not(windows))]
 fn split_args(args: &str) -> Vec<String> {
     let mut parts = Vec::new();
@@ -1324,7 +1499,11 @@ fn extract_icon_native(_app: &AppHandle, _path: &str, _item_id: &str) -> Result<
     let data_path = state_path(_app);
     let dir = icons_dir(&data_path);
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let output = dir.join(format!("{_item_id}.png"));
+    let relative_path = Path::new("icons").join(format!("{}.png", icon_file_stem(_item_id)?));
+    let output = data_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&relative_path);
 
     let icon = file_icon(_path)?;
     let result = hicon_to_png(icon, &output);
@@ -1334,7 +1513,7 @@ fn extract_icon_native(_app: &AppHandle, _path: &str, _item_id: &str) -> Result<
     result?;
 
     if output.exists() {
-        Ok(output.to_string_lossy().to_string())
+        Ok(relative_path.to_string_lossy().to_string())
     } else {
         Err("Icon extraction did not create an output file".into())
     }
@@ -1491,6 +1670,91 @@ fn hicon_to_png(
 #[tauri::command]
 fn launch_target(path: String, args: String, target_type: TargetType) -> Result<(), String> {
     launch_target_native(sanitize_path(&path), args, target_type)
+}
+
+fn directory_from_path(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err("程序路径不能为空".into());
+    }
+    if path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法确定程序所在目录".into())
+}
+
+fn location_target_path(path: &str) -> Result<PathBuf, String> {
+    let path = sanitize_path(path);
+    if path.trim().is_empty() || is_url_path(&path) || is_internet_shortcut_path(&path) {
+        return Err("网址没有可打开的本地目录".into());
+    }
+    let target = if is_shortcut_path(&path) {
+        resolve_shortcut_native(&path)
+            .map(|(resolved_path, _)| resolved_path)
+            .unwrap_or(path)
+    } else {
+        path
+    };
+    Ok(PathBuf::from(target))
+}
+
+#[tauri::command]
+fn open_program_in_explorer(path: String) -> Result<(), String> {
+    let target = location_target_path(&path)?;
+    open_program_in_explorer_native(&target)
+}
+
+#[cfg(windows)]
+fn open_program_in_explorer_native(target: &Path) -> Result<(), String> {
+    let mut command = Command::new("explorer");
+    if target.is_dir() {
+        command.arg(target);
+    } else {
+        command.arg(format!("/select,{}", target.to_string_lossy()));
+    }
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn open_program_in_explorer_native(target: &Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(directory_from_path(target)?)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_program_in_terminal(path: String) -> Result<(), String> {
+    let target = location_target_path(&path)?;
+    let directory = directory_from_path(&target)?;
+    open_program_in_terminal_native(&directory)
+}
+
+#[cfg(windows)]
+fn open_program_in_terminal_native(directory: &Path) -> Result<(), String> {
+    match Command::new("wt.exe").arg("-d").arg(directory).spawn() {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Command::new("powershell.exe")
+            .current_dir(directory)
+            .arg("-NoExit")
+            .spawn()
+            .map(|_| ())
+            .map_err(|fallback_error| fallback_error.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(not(windows))]
+fn open_program_in_terminal_native(directory: &Path) -> Result<(), String> {
+    Command::new("x-terminal-emulator")
+        .current_dir(directory)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -1734,20 +1998,85 @@ mod tests {
 
     #[test]
     fn release_update_requires_a_newer_trusted_executable() {
+        let current = current_version();
+        let next_version = semver::Version::new(current.major, current.minor + 1, 0);
+        let tag_name = format!("v{next_version}");
         let release = GiteeRelease {
-            tag_name: "v1.13.0".into(),
+            tag_name: tag_name.clone(),
             body: String::new(),
             prerelease: false,
             assets: vec![GiteeReleaseAsset {
                 name: "quick-launcher.exe".into(),
                 browser_download_url: format!(
-                    "{GITEE_RELEASE_DOWNLOAD_PREFIX}v1.13.0/quick-launcher.exe"
+                    "{GITEE_RELEASE_DOWNLOAD_PREFIX}{tag_name}/quick-launcher.exe"
                 ),
             }],
         };
 
         assert!(release_version(&release).unwrap() > current_version());
         assert!(trusted_release_download_url(portable_update_asset(&release).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn default_hotkey_is_alt_r() {
+        assert_eq!(default_data().settings.hotkey, DEFAULT_HOTKEY);
+    }
+
+    #[test]
+    fn program_directory_uses_the_file_parent_or_directory_itself() {
+        let directory = std::env::temp_dir();
+        assert_eq!(
+            directory_from_path(&directory.join("quick-launcher-test.exe")).unwrap(),
+            directory
+        );
+        assert_eq!(directory_from_path(&directory).unwrap(), directory);
+    }
+
+    #[test]
+    fn icon_path_inside_the_app_directory_is_saved_relatively() {
+        let directory = std::env::temp_dir().join("quick-launcher-icon-path-test");
+        let data_path = directory.join("launcher-data.json");
+        let icon_path = directory.join("icons").join("app.png");
+
+        assert_eq!(
+            PathBuf::from(relative_icon_path(&data_path, &icon_path).unwrap()),
+            PathBuf::from("icons").join("app.png")
+        );
+    }
+
+    #[test]
+    fn launch_schedule_normalizes_intervals_and_daily_times() {
+        let mut schedule = LaunchSchedule {
+            enabled: true,
+            mode: ScheduleMode::Daily,
+            interval_minutes: 0,
+            weekdays: vec![5, 3, 1, 3, 9],
+            daily_times: vec![
+                "20:30".into(),
+                "08:00".into(),
+                "20:30".into(),
+                "25:00".into(),
+            ],
+        };
+
+        normalize_launch_schedule(&mut schedule);
+
+        assert_eq!(schedule.interval_minutes, 1);
+        assert_eq!(schedule.weekdays, vec![1, 3, 5]);
+        assert_eq!(schedule.daily_times, vec!["08:00", "20:30"]);
+    }
+
+    #[test]
+    fn legacy_daily_schedule_defaults_to_all_weekdays() {
+        let schedule: LaunchSchedule = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "mode": "daily",
+            "intervalMinutes": 30,
+            "dailyTimes": ["08:00"]
+        }))
+        .unwrap();
+
+        assert_eq!(schedule.weekdays, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

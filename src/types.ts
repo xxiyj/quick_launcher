@@ -1,5 +1,6 @@
 export type TargetType = "program" | "shortcut" | "folder" | "url";
 export type LaunchMode = "single" | "double";
+export type LaunchScheduleMode = "interval" | "daily";
 export type Theme = "light" | "dark";
 export type ItemKind = "launcher" | "memo" | "workspaceFolder";
 
@@ -25,11 +26,20 @@ export interface LauncherItem {
   categoryId: string;
   parentId?: string | null;
   iconPath?: string;
+  schedule?: LaunchSchedule;
   searchKey: string;
   order: number;
   launchCount?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface LaunchSchedule {
+  enabled: boolean;
+  mode: LaunchScheduleMode;
+  intervalMinutes: number;
+  weekdays: number[];
+  dailyTimes: string[];
 }
 
 export interface LauncherSettings {

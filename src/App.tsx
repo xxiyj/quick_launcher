@@ -20,6 +20,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   AppWindow,
   ChevronRight,
+  Clock3,
   Download,
   Edit3,
   Eye,
@@ -33,12 +34,14 @@ import {
   Maximize2,
   Minus,
   Moon,
+  Play,
   Plus,
   RefreshCw,
   Search,
   Settings,
   StickyNote,
   Sun,
+  Terminal,
   Trash2,
   X,
 } from "lucide-react";
@@ -62,6 +65,8 @@ import {
   launchTarget,
   loadData,
   moveWorkspaceFile,
+  openProgramInExplorer,
+  openProgramInTerminal,
   readMemo,
   recycleWorkspacePath,
   renameWorkspaceFolder,
@@ -70,10 +75,11 @@ import {
   saveData,
   saveMemo,
   saveWindowSize,
+  storeIcon,
   updateHotkey,
   updateStartup,
 } from "./tauri";
-import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, TargetType, Theme, UpdateInfo } from "./types";
+import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, LaunchSchedule, LaunchScheduleMode, TargetType, Theme, UpdateInfo } from "./types";
 
 const COLORS = ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0", "#00a3a3"];
 const APP_VERSION = packageJson.version.replace(/\.0$/, "");
@@ -81,6 +87,18 @@ const BLUR_HIDE_DELAY_MS = 150;
 const TITLEBAR_BLUR_SUPPRESSION_MS = 1500;
 const WINDOW_MOVE_BLUR_SUPPRESSION_MS = 500;
 const UPDATE_CHECK_FEEDBACK_MS = 350;
+const DEFAULT_HOTKEY = "Alt+R";
+const DEFAULT_DAILY_TIME = "08:00";
+const INTERVAL_PRESETS = [5, 15, 30, 60];
+const WEEKDAYS = [
+  { value: 1, label: "周一" },
+  { value: 2, label: "周二" },
+  { value: 3, label: "周三" },
+  { value: 4, label: "周四" },
+  { value: 5, label: "周五" },
+  { value: 6, label: "周六" },
+  { value: 7, label: "周日" },
+];
 
 const emptyDraft: ItemDraft = {
   name: "",
@@ -118,6 +136,16 @@ interface DeleteConfirmation {
   description: string;
 }
 
+interface CardContextMenuState {
+  item: LauncherItem;
+  x: number;
+  y: number;
+}
+
+interface ScheduleDraft extends LaunchSchedule {
+  itemId: string;
+}
+
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 }
@@ -127,13 +155,58 @@ function localMemoTitle(now = new Date()) {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
 }
 
+function isValidScheduleTime(value: string) {
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return false;
+  return Number(match[1]) < 24 && Number(match[2]) < 60;
+}
+
+function normalizeLaunchSchedule(schedule?: LaunchSchedule): LaunchSchedule {
+  const intervalMinutes = Math.min(10_080, Math.max(1, Math.floor(Number(schedule?.intervalMinutes) || 30)));
+  const weekdays = [...new Set((schedule?.weekdays ?? WEEKDAYS.map((day) => day.value)).filter((day) => Number.isInteger(day) && day >= 1 && day <= 7))].sort((a, b) => a - b);
+  const dailyTimes = [...new Set((schedule?.dailyTimes ?? []).filter(isValidScheduleTime))].sort();
+  return {
+    enabled: schedule?.enabled ?? true,
+    mode: schedule?.mode === "daily" ? "daily" : "interval",
+    intervalMinutes,
+    weekdays: weekdays.length ? weekdays : WEEKDAYS.map((day) => day.value),
+    dailyTimes: dailyTimes.length ? dailyTimes : [DEFAULT_DAILY_TIME],
+  };
+}
+
+function localScheduleDay(now: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+function localScheduleTime(now: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+function localScheduleWeekday(now: Date) {
+  return now.getDay() || 7;
+}
+
+function nextAvailableScheduleTime(times: string[]) {
+  const existing = new Set(times);
+  for (const candidate of ["08:00", "12:00", "18:00", "20:30"]) {
+    if (!existing.has(candidate)) return candidate;
+  }
+  for (let minute = 0; minute < 24 * 60; minute += 15) {
+    const candidate = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return DEFAULT_DAILY_TIME;
+}
+
 function defaultData(): LauncherData {
   return {
     version: 2,
     categories: [{ id: "default", name: "常用", color: "#2f80ed", order: 0 }],
     items: [],
     settings: {
-      hotkey: "Ctrl+Space",
+      hotkey: DEFAULT_HOTKEY,
       closeToTray: true,
       autoStart: false,
       autoHideAfterLaunch: true,
@@ -164,6 +237,7 @@ function normalizeData(data: LauncherData): LauncherData {
       parentId: item.parentId ?? null,
       args: item.args ?? "",
       targetType: item.targetType ?? "program",
+      schedule: item.schedule ? normalizeLaunchSchedule(item.schedule) : undefined,
     })),
     settings: {
       ...defaults.settings,
@@ -274,6 +348,8 @@ export default function App() {
   const [memoDraft, setMemoDraft] = useState<MemoDraft | null>(null);
   const [folderDraft, setFolderDraft] = useState<FolderDraft | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
+  const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
+  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -283,6 +359,8 @@ export default function App() {
   const pendingBlurHide = useRef<number | undefined>(undefined);
   const ignoreAutoHideUntil = useRef(0);
   const lastSavedWindowSize = useRef<{ width: number; height: number } | undefined>(undefined);
+  const intervalScheduleState = useRef(new Map<string, { signature: string; lastRunAt: number }>());
+  const dailyScheduleRuns = useRef(new Set<string>());
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -296,7 +374,7 @@ export default function App() {
     () => data.items.find((item) => item.id === currentFolderId && item.kind === "workspaceFolder"),
     [currentFolderId, data.items],
   );
-  const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen);
+  const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen || scheduleDraft);
 
   useEffect(() => {
     loadData()
@@ -325,6 +403,73 @@ export default function App() {
     }, 250);
     return () => window.clearTimeout(id);
   }, [data, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const checkSchedules = () => {
+      const now = new Date();
+      const nowMs = now.getTime();
+      const time = localScheduleTime(now);
+      const day = localScheduleDay(now);
+      const weekday = localScheduleWeekday(now);
+      const activeIntervalIds = new Set<string>();
+
+      for (const item of data.items) {
+        if (!isLauncher(item) || item.targetType === "url" || !item.schedule?.enabled) continue;
+        const schedule = normalizeLaunchSchedule(item.schedule);
+        if (schedule.mode === "interval") {
+          activeIntervalIds.add(item.id);
+          const signature = `${schedule.intervalMinutes}`;
+          const state = intervalScheduleState.current.get(item.id);
+          if (!state || state.signature !== signature) {
+            intervalScheduleState.current.set(item.id, { signature, lastRunAt: nowMs });
+            continue;
+          }
+          if (nowMs - state.lastRunAt >= schedule.intervalMinutes * 60_000) {
+            state.lastRunAt = nowMs;
+            void runItem(item, "scheduled");
+          }
+          continue;
+        }
+
+        if (!schedule.weekdays.includes(weekday) || !schedule.dailyTimes.includes(time)) continue;
+        const runKey = `${item.id}:${day}:${time}`;
+        if (dailyScheduleRuns.current.has(runKey)) continue;
+        dailyScheduleRuns.current.add(runKey);
+        void runItem(item, "scheduled");
+      }
+
+      for (const id of intervalScheduleState.current.keys()) {
+        if (!activeIntervalIds.has(id)) intervalScheduleState.current.delete(id);
+      }
+      if (dailyScheduleRuns.current.size > 512) {
+        const todayPrefix = `:${day}:`;
+        dailyScheduleRuns.current = new Set([...dailyScheduleRuns.current].filter((key) => key.includes(todayPrefix)));
+      }
+    };
+
+    checkSchedules();
+    const timer = window.setInterval(checkSchedules, 15_000);
+    return () => window.clearInterval(timer);
+  }, [data.items, loaded]);
+
+  useEffect(() => {
+    if (!cardContextMenu) return;
+    const closeMenu = () => setCardContextMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [cardContextMenu]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -894,25 +1039,32 @@ export default function App() {
   async function pickIcon() {
     const path = await chooseIcon();
     if (!path) return;
-    if (isImageIconPath(path)) {
-      setDraft((current) => ({ ...(current ?? emptyDraft), iconPath: path }));
-      return;
-    }
-    if (!isExtractableIconPath(path)) return;
     try {
-      setStatus("正在提取图标...");
-      const source = isShortcutPath(path) ? (await resolveTarget(path)).path : path;
       const itemId = draft?.id ?? newId("icon");
-      const iconPath = await extractIcon(source, itemId);
+      setStatus(isImageIconPath(path) ? "正在保存图标..." : "正在提取图标...");
+      const iconPath = await prepareIconPath(path, itemId);
       if (!iconPath) {
         setStatus("没有读取到可用图标");
         return;
       }
       setDraft((current) => ({ ...(current ?? emptyDraft), iconPath }));
-      setStatus("图标已更新");
+      setStatus(isImageIconPath(path) ? "图标已保存到应用目录" : "图标已更新");
     } catch (error) {
-      setStatus(`图标提取失败：${String(error)}`);
+      setStatus(`图标处理失败：${String(error)}`);
     }
+  }
+
+  async function prepareIconPath(iconPath: string | undefined, itemId: string): Promise<string | undefined> {
+    const path = iconPath?.trim();
+    if (!path) return undefined;
+    if (isExtractableIconPath(path)) {
+      const source = isShortcutPath(path) ? (await resolveTarget(path)).path : path;
+      const extracted = await extractIcon(source, itemId);
+      if (!extracted) throw new Error("没有读取到可用图标");
+      return extracted;
+    }
+    if (!isImageIconPath(path)) throw new Error("图标仅支持 PNG、JPG、JPEG、ICO、EXE 或快捷方式文件");
+    return storeIcon(path, itemId);
   }
 
   async function submitDraft() {
@@ -922,6 +1074,14 @@ export default function App() {
     }
     if (draft.targetType === "url" && !isUrlPath(draft.path)) {
       setStatus("网址必须以 http:// 或 https:// 开头");
+      return;
+    }
+    const itemId = draft.id ?? newId("item");
+    let iconPath: string | undefined;
+    try {
+      iconPath = await prepareIconPath(draft.iconPath, itemId);
+    } catch (error) {
+      setStatus(`保存图标失败：${String(error)}`);
       return;
     }
     const now = new Date().toISOString();
@@ -947,7 +1107,7 @@ export default function App() {
       }
     }
     const item: LauncherItem = {
-      id: draft.id ?? newId("item"),
+      id: itemId,
       kind: "launcher",
       name: draft.name.trim(),
       path,
@@ -955,7 +1115,7 @@ export default function App() {
       targetType,
       categoryId: parent?.categoryId ?? draft.categoryId ?? selectedCategoryId(),
       parentId,
-      iconPath: draft.iconPath,
+      iconPath,
       searchKey: buildSearchKey(draft.name, `${path} ${args}`),
       order: existing?.order ?? data.items.length,
       launchCount: existing?.launchCount ?? 0,
@@ -1127,6 +1287,7 @@ export default function App() {
       setDraft(null);
       setMemoDraft(null);
       setFolderDraft(null);
+      if (scheduleDraft && removedIds.has(scheduleDraft.itemId)) setScheduleDraft(null);
       setStatus("已删除");
     } catch (error) {
       setStatus(`删除失败：${String(error)}`);
@@ -1145,7 +1306,7 @@ export default function App() {
     if (item) await removeNode(item);
   }
 
-  async function runItem(item: LauncherItem) {
+  async function runItem(item: LauncherItem, source: "manual" | "scheduled" = "manual") {
     if (!isLauncher(item)) return;
     try {
       await launchTarget(item.path, item.args, item.targetType);
@@ -1157,12 +1318,52 @@ export default function App() {
             : value,
         ),
       }));
-      setQuery("");
-      if (data.settings.autoHideAfterLaunch) await hideMainWindow("launch");
-      setStatus(`已启动 ${item.name}`);
+      if (source === "manual") {
+        setQuery("");
+        if (data.settings.autoHideAfterLaunch) await hideMainWindow("launch");
+      }
+      setStatus(source === "scheduled" ? `已定时启动 ${item.name}` : `已启动 ${item.name}`);
     } catch (error) {
       setStatus(`启动失败：${String(error)}`);
     }
+  }
+
+  function openCardContextMenu(item: LauncherItem, x: number, y: number) {
+    const width = 218;
+    const height = 188;
+    setCardContextMenu({
+      item,
+      x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
+    });
+  }
+
+  async function openProgramDirectory(item: LauncherItem, destination: "explorer" | "terminal") {
+    try {
+      if (destination === "explorer") await openProgramInExplorer(item.path);
+      else await openProgramInTerminal(item.path);
+      setStatus(destination === "explorer" ? `已在资源管理器中打开「${item.name}」所在目录` : `已在终端中打开「${item.name}」所在目录`);
+    } catch (error) {
+      setStatus(`${destination === "explorer" ? "打开资源管理器" : "打开终端"}失败：${String(error)}`);
+    }
+  }
+
+  function openSchedule(item: LauncherItem) {
+    if (!isLauncher(item) || item.targetType === "url") return;
+    setScheduleDraft({ itemId: item.id, ...normalizeLaunchSchedule(item.schedule) });
+  }
+
+  function saveSchedule() {
+    if (!scheduleDraft) return;
+    const schedule = normalizeLaunchSchedule(scheduleDraft);
+    persist((current) => ({
+      ...current,
+      items: current.items.map((item) =>
+        item.id === scheduleDraft.itemId ? { ...item, schedule, updatedAt: new Date().toISOString() } : item,
+      ),
+    }));
+    setScheduleDraft(null);
+    setStatus(schedule.enabled ? "定时启动已保存" : "定时启动已关闭");
   }
 
   async function saveSettings(
@@ -1176,7 +1377,7 @@ export default function App() {
     launchMode: LaunchMode,
   ) {
     try {
-      const nextHotkey = hotkey.trim() || "Ctrl+Space";
+      const nextHotkey = hotkey.trim() || DEFAULT_HOTKEY;
       await updateHotkey(nextHotkey);
       await updateStartup(autoStart);
       persist((current) => ({
@@ -1261,7 +1462,8 @@ export default function App() {
               <section className={`grid ${query.trim() || data.settings.autoSortByLaunchCount ? "sorting-disabled" : ""}`} aria-label="启动项列表">
                 {visibleItems.map((item) => (
                   <SortableAppCard
-                    categoryName={item.categoryId === "all" ? "全部" : categories.find((category) => category.id === item.categoryId)?.name ?? "未分组"}
+                  categoryName={item.categoryId === "all" ? "全部" : categories.find((category) => category.id === item.categoryId)?.name ?? "未分组"}
+                    iconBasePath={dataPath}
                     item={item}
                     key={item.id}
                     launchMode={data.settings.launchMode}
@@ -1273,6 +1475,7 @@ export default function App() {
                     }}
                     onOpenFolder={() => enterFolder(item)}
                     onOpenMemo={() => void openMemo(item)}
+                    onOpenContextMenu={openCardContextMenu}
                     onRun={() => void runItem(item)}
                   />
                 ))}
@@ -1356,6 +1559,28 @@ export default function App() {
           showCardMeta={data.settings.showCardMeta}
           onClose={() => setSettingsOpen(false)}
           onSubmit={saveSettings}
+        />
+      ) : null}
+
+      {cardContextMenu ? (
+        <CardContextMenu
+          item={cardContextMenu.item}
+          onClose={() => setCardContextMenu(null)}
+          onOpenExplorer={() => void openProgramDirectory(cardContextMenu.item, "explorer")}
+          onOpenTerminal={() => void openProgramDirectory(cardContextMenu.item, "terminal")}
+          onRun={() => void runItem(cardContextMenu.item)}
+          onSchedule={() => openSchedule(cardContextMenu.item)}
+          x={cardContextMenu.x}
+          y={cardContextMenu.y}
+        />
+      ) : null}
+
+      {scheduleDraft ? (
+        <ScheduleModal
+          draft={scheduleDraft}
+          onChange={setScheduleDraft}
+          onClose={() => setScheduleDraft(null)}
+          onSubmit={saveSchedule}
         />
       ) : null}
 
@@ -1599,28 +1824,31 @@ function SortableSidebarCategory({ category, count, disabledDelete, onDelete, on
 
 interface SortableAppCardProps {
   categoryName: string;
+  iconBasePath: string;
   item: LauncherItem;
   launchMode: LaunchMode;
   showCardMeta: boolean;
   onEdit: () => void;
   onOpenFolder: () => void;
   onOpenMemo: () => void;
+  onOpenContextMenu: (item: LauncherItem, x: number, y: number) => void;
   onRun: () => void;
 }
 
-function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onRun, showCardMeta }: SortableAppCardProps) {
+function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onOpenContextMenu, onRun, showCardMeta }: SortableAppCardProps) {
   const folder = item.kind === "workspaceFolder";
   const sortable = useSortable({ id: item.id, disabled: folder });
   const droppable = useDroppable({ id: `folder-drop-${item.id}`, disabled: !folder });
   const style = { transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition };
   const isOverFolder = folder && droppable.isOver;
   const isDragging = sortable.isDragging;
+  const hasSchedule = isLauncher(item) && Boolean(item.schedule?.enabled);
   const icon = item.kind === "memo"
     ? <StickyNote size={34} />
     : folder
       ? <FolderOpen size={34} />
       : item.iconPath
-        ? <img alt="" src={assetUrl(item.iconPath)} />
+        ? <img alt="" src={assetUrl(item.iconPath, iconBasePath)} />
         : item.targetType === "folder"
           ? <FolderOpen size={34} />
           : item.targetType === "url"
@@ -1635,8 +1863,14 @@ function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder,
 
   return (
     <article
-      className={`app-card ${folder ? "workspace-folder-card" : ""} ${isDragging ? "drag-sorting" : ""} ${isOverFolder ? "folder-drop-target" : ""}`}
+      className={`app-card ${folder ? "workspace-folder-card" : ""} ${hasSchedule ? "has-schedule" : ""} ${isDragging ? "drag-sorting" : ""} ${isOverFolder ? "folder-drop-target" : ""}`}
       onDoubleClick={isLauncher(item) && launchMode === "double" ? onRun : undefined}
+      onContextMenu={(event) => {
+        if (!isLauncher(item) || item.targetType === "url") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenContextMenu(item, event.clientX, event.clientY);
+      }}
       ref={folder ? droppable.setNodeRef : sortable.setNodeRef}
       style={style}
       {...(!folder ? sortable.attributes : {})}
@@ -1650,8 +1884,37 @@ function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder,
       <div className="card-tools">
         <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title={folder ? "重命名" : item.kind === "memo" ? "编辑备忘录" : "编辑"} type="button"><Edit3 size={16} /></button>
       </div>
+      {hasSchedule ? <span aria-label="已设置定时启动" className="schedule-badge" title="已设置定时启动"><Clock3 size={12} />定时</span> : null}
       {isOverFolder ? <span className="folder-drop-hint">放入文件夹</span> : null}
     </article>
+  );
+}
+
+interface CardContextMenuProps {
+  item: LauncherItem;
+  onClose: () => void;
+  onOpenExplorer: () => void;
+  onOpenTerminal: () => void;
+  onRun: () => void;
+  onSchedule: () => void;
+  x: number;
+  y: number;
+}
+
+function CardContextMenu({ item, onClose, onOpenExplorer, onOpenTerminal, onRun, onSchedule, x, y }: CardContextMenuProps) {
+  function invoke(action: () => void) {
+    onClose();
+    action();
+  }
+
+  return (
+    <div aria-label={`${item.name} 操作菜单`} className="card-context-menu" onContextMenu={(event) => event.preventDefault()} onPointerDown={(event) => event.stopPropagation()} role="menu" style={{ left: x, top: y }}>
+      <button onClick={() => invoke(onRun)} role="menuitem" type="button"><Play size={16} />运行</button>
+      <button onClick={() => invoke(onSchedule)} role="menuitem" type="button"><Clock3 size={16} />定时启动</button>
+      <span className="context-menu-divider" />
+      <button onClick={() => invoke(onOpenExplorer)} role="menuitem" type="button"><FolderOpen size={16} />用资源管理器打开</button>
+      <button onClick={() => invoke(onOpenTerminal)} role="menuitem" type="button"><Terminal size={16} />在终端中打开</button>
+    </div>
   );
 }
 
@@ -1800,6 +2063,101 @@ function FolderModal({ categories, draft, onChange, onClose, onDelete, onSubmit 
   );
 }
 
+interface ScheduleModalProps {
+  draft: ScheduleDraft;
+  onChange: (draft: ScheduleDraft) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}
+
+function ScheduleModal({ draft, onChange, onClose, onSubmit }: ScheduleModalProps) {
+  const dailyTimes = [...draft.dailyTimes].sort();
+  const disabled = !draft.enabled;
+
+  function setMode(mode: LaunchScheduleMode) {
+    onChange({
+      ...draft,
+      mode,
+      dailyTimes: draft.dailyTimes.length ? draft.dailyTimes : [DEFAULT_DAILY_TIME],
+    });
+  }
+
+  function changeDailyTime(current: string, value: string) {
+    onChange({ ...draft, dailyTimes: draft.dailyTimes.map((time) => time === current ? value : time) });
+  }
+
+  function removeDailyTime(value: string) {
+    if (draft.dailyTimes.length <= 1) return;
+    onChange({ ...draft, dailyTimes: draft.dailyTimes.filter((time) => time !== value) });
+  }
+
+  function toggleWeekday(day: number) {
+    const selected = draft.weekdays.includes(day);
+    if (selected && draft.weekdays.length <= 1) return;
+    const weekdays = selected
+      ? draft.weekdays.filter((value) => value !== day)
+      : [...draft.weekdays, day].sort((left, right) => left - right);
+    onChange({ ...draft, weekdays });
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section aria-modal="true" className="modal schedule-modal" role="dialog">
+        <header><h2>定时启动</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
+        <div className="schedule-body">
+          <label className="check-row"><input checked={draft.enabled} onChange={(event) => onChange({ ...draft, enabled: event.target.checked })} type="checkbox" />启用定时启动</label>
+          <div className={`schedule-fields ${disabled ? "disabled" : ""}`}>
+            <div className="schedule-field">
+              <span>启动方式</span>
+              <div className="segmented">
+                <button className={draft.mode === "interval" ? "active" : ""} disabled={disabled} onClick={() => setMode("interval")} type="button">按间隔启动</button>
+                <button className={draft.mode === "daily" ? "active" : ""} disabled={disabled} onClick={() => setMode("daily")} type="button">每天定时启动</button>
+              </div>
+            </div>
+
+            {draft.mode === "interval" ? (
+              <>
+                <div className="schedule-field">
+                  <span>常用间隔</span>
+                  <div className="interval-presets">
+                    {INTERVAL_PRESETS.map((minutes) => <button aria-pressed={draft.intervalMinutes === minutes} className={draft.intervalMinutes === minutes ? "active" : ""} disabled={disabled} key={minutes} onClick={() => onChange({ ...draft, intervalMinutes: minutes })} type="button">{minutes} 分钟</button>)}
+                  </div>
+                </div>
+                <label className="schedule-field"><span>自定义间隔</span><span className="schedule-minutes-input"><input disabled={disabled} max={10080} min={1} onChange={(event) => onChange({ ...draft, intervalMinutes: Number(event.target.value) })} type="number" value={draft.intervalMinutes} />分钟</span></label>
+              </>
+            ) : (
+              <>
+                <div className="schedule-field weekly-days-field">
+                  <span>每周日期</span>
+                  <div className="weekday-picker">
+                    {WEEKDAYS.map((day) => {
+                      const selected = draft.weekdays.includes(day.value);
+                      return <button aria-pressed={selected} className={selected ? "active" : ""} disabled={disabled || (selected && draft.weekdays.length <= 1)} key={day.value} onClick={() => toggleWeekday(day.value)} type="button">{day.label}</button>;
+                    })}
+                  </div>
+                </div>
+                <div className="schedule-field daily-times-field">
+                  <span>每天时间</span>
+                  <div className="schedule-time-list">
+                    {dailyTimes.map((time, index) => (
+                      <div className="schedule-time-row" key={`${time}-${index}`}>
+                        <input aria-label={`启动时间 ${time}`} disabled={disabled} onChange={(event) => changeDailyTime(time, event.target.value)} type="time" value={time} />
+                        <button aria-label={`移除 ${time}`} disabled={disabled || dailyTimes.length <= 1} onClick={() => removeDailyTime(time)} title="移除时间" type="button"><X size={16} /></button>
+                      </div>
+                    ))}
+                    <button aria-label="添加启动时间" className="schedule-add-time" disabled={disabled || dailyTimes.length >= 24} onClick={() => onChange({ ...draft, dailyTimes: [...draft.dailyTimes, nextAvailableScheduleTime(draft.dailyTimes)] })} title="添加时间" type="button"><Plus size={17} /></button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+        <footer><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>
+      </section>
+    </div>
+  );
+}
+
 interface SettingsModalProps {
   autoStart: boolean;
   autoHideAfterLaunch: boolean;
@@ -1886,7 +2244,7 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
     }
     if (["Control", "Shift", "Alt", "Meta"].includes(key)) return;
     const parts = [event.ctrlKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : "", event.metaKey ? "Super" : "", key.length === 1 ? key.toUpperCase() : key].filter(Boolean);
-    setNextHotkey(parts.join("+") || "Ctrl+Space");
+    setNextHotkey(parts.join("+") || DEFAULT_HOTKEY);
     setCapturingHotkey(false);
   }
 
@@ -1902,7 +2260,7 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
           <label className="check-row"><input checked={nextAutoSortByLaunchCount} onChange={(event) => setNextAutoSortByLaunchCount(event.target.checked)} type="checkbox" />按打开次数自动排序</label>
           <label className="check-row"><input checked={nextShowCardMeta} onChange={(event) => setNextShowCardMeta(event.target.checked)} type="checkbox" />显示卡片分组与类型</label>
           <label><span>启动方式</span><div className="segmented"><button className={nextLaunchMode === "single" ? "active" : ""} onClick={() => setNextLaunchMode("single")} type="button">单击启动</button><button className={nextLaunchMode === "double" ? "active" : ""} onClick={() => setNextLaunchMode("double")} type="button">双击启动</button></div></label>
-          <label><span><Keyboard size={17} />全局热键</span><button className={`hotkey-capture ${capturingHotkey ? "capturing" : ""}`} onBlur={() => setCapturingHotkey(false)} onClick={() => setCapturingHotkey(true)} onKeyDown={captureHotkey} type="button">{capturingHotkey ? "请按下快捷键..." : nextHotkey || "Ctrl+Space"}</button></label>
+          <label><span><Keyboard size={17} />全局热键</span><button className={`hotkey-capture ${capturingHotkey ? "capturing" : ""}`} onBlur={() => setCapturingHotkey(false)} onClick={() => setCapturingHotkey(true)} onKeyDown={captureHotkey} type="button">{capturingHotkey ? "请按下快捷键..." : nextHotkey || DEFAULT_HOTKEY}</button></label>
         </div>
         <footer className="settings-footer">
           <div className="settings-about">
@@ -1922,7 +2280,7 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
               <span aria-live="polite">{updateLabel}</span>
             </button>
           </div>
-          <div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode)} type="button">保存</button></div>
+          <div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || DEFAULT_HOTKEY, nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode)} type="button">保存</button></div>
         </footer>
       </section>
     </div>

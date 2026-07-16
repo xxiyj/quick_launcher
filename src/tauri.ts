@@ -3,10 +3,19 @@ import type { DataEnvelope, LauncherData, ResolvedTarget, TargetType, UpdateInfo
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 const browserPreviewDataKey = "quick-launcher-preview-data";
+const defaultHotkey = "Alt+R";
 
-export function assetUrl(path?: string): string | undefined {
+function resolveAssetPath(path: string, dataPath?: string): string {
+  if (!dataPath || dataPath === "browser-preview" || /^(?:[a-z]:[\\/]|\\\\|\/)/i.test(path)) return path;
+  const directory = dataPath.replace(/[\\/][^\\/]+$/, "");
+  if (!directory) return path;
+  const separator = dataPath.includes("\\") ? "\\" : "/";
+  return `${directory}${separator}${path.replace(/[\\/]+/g, separator)}`;
+}
+
+export function assetUrl(path?: string, dataPath?: string): string | undefined {
   if (!path) return undefined;
-  return isTauri ? convertFileSrc(path) : undefined;
+  return isTauri ? convertFileSrc(resolveAssetPath(path, dataPath)) : undefined;
 }
 
 export async function loadData(): Promise<DataEnvelope> {
@@ -19,7 +28,7 @@ export async function loadData(): Promise<DataEnvelope> {
       ],
       items: [],
       settings: {
-        hotkey: "Ctrl+Space",
+        hotkey: defaultHotkey,
         closeToTray: true,
         autoStart: false,
         autoHideAfterLaunch: true,
@@ -101,9 +110,24 @@ export async function extractIcon(path: string, itemId: string): Promise<string 
   return invoke<string | null>("extract_icon", { path, itemId });
 }
 
+export async function storeIcon(path: string, itemId: string): Promise<string> {
+  if (!isTauri) return path;
+  return invoke<string>("store_icon", { path, itemId });
+}
+
 export async function launchTarget(path: string, args: string, targetType: TargetType): Promise<void> {
   if (!isTauri) return;
   await invoke("launch_target", { path, args, targetType });
+}
+
+export async function openProgramInExplorer(path: string): Promise<void> {
+  if (!isTauri) return;
+  await invoke("open_program_in_explorer", { path });
+}
+
+export async function openProgramInTerminal(path: string): Promise<void> {
+  if (!isTauri) return;
+  await invoke("open_program_in_terminal", { path });
 }
 
 export async function updateHotkey(hotkey: string): Promise<void> {
