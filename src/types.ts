@@ -1,5 +1,6 @@
 export type TargetType = "program" | "shortcut" | "folder" | "url";
 export type LaunchMode = "single" | "double";
+export type Theme = "light" | "dark";
 export type ItemKind = "launcher" | "memo" | "workspaceFolder";
 
 export interface WindowSize {
@@ -40,6 +41,7 @@ export interface LauncherSettings {
   autoSortByLaunchCount: boolean;
   showCardMeta: boolean;
   launchMode: LaunchMode;
+  theme: Theme;
   defaultMemoCategoryId?: string;
   windowSize?: WindowSize;
 }
@@ -56,6 +58,11 @@ export interface DataEnvelope {
   dataPath: string;
   writable: boolean;
   message?: string;
+}
+
+export interface UpdateInfo {
+  version: string;
+  notes: string;
 }
 
 export interface ResolvedTarget {

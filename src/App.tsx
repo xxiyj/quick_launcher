@@ -20,6 +20,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   AppWindow,
   ChevronRight,
+  Download,
   Edit3,
   Eye,
   FilePenLine,
@@ -31,10 +32,13 @@ import {
   Link2,
   Maximize2,
   Minus,
+  Moon,
   Plus,
+  RefreshCw,
   Search,
   Settings,
   StickyNote,
+  Sun,
   Trash2,
   X,
 } from "lucide-react";
@@ -47,12 +51,14 @@ import packageJson from "../package.json";
 import { buildSearchKey, matchesSearch } from "./search";
 import {
   assetUrl,
+  checkForUpdate,
   chooseIcon,
   chooseTarget,
   createWorkspaceFolder,
   createWorkspaceShortcut,
   extractIcon,
   hideMainWindow,
+  installUpdate,
   launchTarget,
   loadData,
   moveWorkspaceFile,
@@ -67,13 +73,14 @@ import {
   updateHotkey,
   updateStartup,
 } from "./tauri";
-import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, TargetType } from "./types";
+import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, TargetType, Theme, UpdateInfo } from "./types";
 
 const COLORS = ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0", "#00a3a3"];
 const APP_VERSION = packageJson.version.replace(/\.0$/, "");
 const BLUR_HIDE_DELAY_MS = 150;
 const TITLEBAR_BLUR_SUPPRESSION_MS = 1500;
 const WINDOW_MOVE_BLUR_SUPPRESSION_MS = 500;
+const UPDATE_CHECK_FEEDBACK_MS = 350;
 
 const emptyDraft: ItemDraft = {
   name: "",
@@ -134,6 +141,7 @@ function defaultData(): LauncherData {
       autoSortByLaunchCount: true,
       showCardMeta: true,
       launchMode: "single",
+      theme: "light",
       defaultMemoCategoryId: "default",
     },
   };
@@ -512,6 +520,15 @@ export default function App() {
 
   function persist(updater: (value: LauncherData) => LauncherData) {
     setData((current) => updater(current));
+  }
+
+  function toggleTheme() {
+    const theme = data.settings.theme === "light" ? "dark" : "light";
+    persist((current) => ({
+      ...current,
+      settings: { ...current.settings, theme },
+    }));
+    setStatus(theme === "dark" ? "已切换为深色模式" : "已切换为浅色模式");
   }
 
   function selectCategory(id: string) {
@@ -1184,8 +1201,10 @@ export default function App() {
   }
 
   return (
-    <main className={`shell ${dragActive ? "dragging" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => event.preventDefault()}>
+    <main className={`shell theme-${data.settings.theme} ${dragActive ? "dragging" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => event.preventDefault()}>
       <WindowTitlebar
+        theme={data.settings.theme}
+        onToggleTheme={toggleTheme}
         onTitlebarInteraction={() => {
           ignoreAutoHideUntil.current = Date.now() + TITLEBAR_BLUR_SUPPRESSION_MS;
           window.clearTimeout(pendingBlurHide.current);
@@ -1637,10 +1656,12 @@ function SortableAppCard({ categoryName, item, launchMode, onEdit, onOpenFolder,
 }
 
 interface WindowTitlebarProps {
+  theme: Theme;
   onTitlebarInteraction: () => void;
+  onToggleTheme: () => void;
 }
 
-function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
+function WindowTitlebar({ theme, onTitlebarInteraction, onToggleTheme }: WindowTitlebarProps) {
   async function startDrag(event: ReactMouseEvent) {
     if (!("__TAURI_INTERNALS__" in window)) return;
     onTitlebarInteraction();
@@ -1669,6 +1690,7 @@ function WindowTitlebar({ onTitlebarInteraction }: WindowTitlebarProps) {
         </div>
       </div>
       <div className="window-controls">
+        <button aria-label={theme === "light" ? "切换为深色模式" : "切换为浅色模式"} className="theme-toggle" onClick={() => { onTitlebarInteraction(); onToggleTheme(); }} title={theme === "light" ? "切换为深色模式" : "切换为浅色模式"} type="button">{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
         <button onClick={() => void control("minimize")} title="最小化" type="button"><Minus size={16} /></button>
         <button onClick={() => void control("maximize")} title="最大化/还原" type="button"><Maximize2 size={15} /></button>
         <button className="close-window" onClick={() => void control("close")} title="关闭" type="button"><X size={16} /></button>
@@ -1801,6 +1823,59 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
   const [nextShowCardMeta, setNextShowCardMeta] = useState(showCardMeta);
   const [nextLaunchMode, setNextLaunchMode] = useState<LaunchMode>(launchMode);
   const [capturingHotkey, setCapturingHotkey] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
+  const [updateError, setUpdateError] = useState("");
+  const [updateStatus, setUpdateStatus] = useState<"checking" | "current" | "available" | "downloading" | "error">("checking");
+
+  useEffect(() => {
+    void refreshUpdate();
+  }, []);
+
+  async function refreshUpdate() {
+    const startedAt = Date.now();
+    setUpdateStatus("checking");
+    setUpdateError("");
+    try {
+      const update = await checkForUpdate();
+      const remaining = UPDATE_CHECK_FEEDBACK_MS - (Date.now() - startedAt);
+      if (remaining > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
+      setAvailableUpdate(update);
+      setUpdateStatus(update ? "available" : "current");
+    } catch (error) {
+      const remaining = UPDATE_CHECK_FEEDBACK_MS - (Date.now() - startedAt);
+      if (remaining > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
+      setAvailableUpdate(null);
+      setUpdateError(String(error));
+      setUpdateStatus("error");
+    }
+  }
+
+  async function handleUpdate() {
+    if (!availableUpdate) {
+      void refreshUpdate();
+      return;
+    }
+    setUpdateStatus("downloading");
+    setUpdateError("");
+    try {
+      await installUpdate(availableUpdate.version);
+    } catch (error) {
+      setUpdateError(String(error));
+      setUpdateStatus("error");
+    }
+  }
+
+  const displayedUpdateVersion = availableUpdate?.version.replace(/^v/i, "").replace(/\.0$/, "") ?? "";
+  const updateLabel = updateStatus === "checking"
+    ? "检测中..."
+    : updateStatus === "downloading"
+      ? "正在下载更新..."
+      : updateStatus === "available"
+        ? `发现新版本 ${displayedUpdateVersion}，更新`
+        : updateStatus === "current"
+          ? "已是最新版"
+          : "检测失败，重试";
+  const updateTitle = updateError || availableUpdate?.notes || (updateStatus === "current" ? "当前已是最新版，点击再次检测" : "检查更新");
 
   function captureHotkey(event: React.KeyboardEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -1829,7 +1904,26 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
           <label><span>启动方式</span><div className="segmented"><button className={nextLaunchMode === "single" ? "active" : ""} onClick={() => setNextLaunchMode("single")} type="button">单击启动</button><button className={nextLaunchMode === "double" ? "active" : ""} onClick={() => setNextLaunchMode("double")} type="button">双击启动</button></div></label>
           <label><span><Keyboard size={17} />全局热键</span><button className={`hotkey-capture ${capturingHotkey ? "capturing" : ""}`} onBlur={() => setCapturingHotkey(false)} onClick={() => setCapturingHotkey(true)} onKeyDown={captureHotkey} type="button">{capturingHotkey ? "请按下快捷键..." : nextHotkey || "Ctrl+Space"}</button></label>
         </div>
-        <footer className="settings-footer"><span className="settings-version">版本 {APP_VERSION}</span><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode)} type="button">保存</button></div></footer>
+        <footer className="settings-footer">
+          <div className="settings-about">
+            <span className="settings-version">版本 {APP_VERSION}</span>
+            <button
+              className="update-link"
+              disabled={updateStatus === "checking" || updateStatus === "downloading"}
+              onClick={() => void handleUpdate()}
+              title={updateTitle}
+              type="button"
+            >
+              {updateStatus === "downloading" || updateStatus === "checking"
+                ? <RefreshCw className="spinning" size={14} />
+                : updateStatus === "available"
+                  ? <Download size={14} />
+                  : <RefreshCw size={14} />}
+              <span aria-live="polite">{updateLabel}</span>
+            </button>
+          </div>
+          <div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || "Ctrl+Space", nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode)} type="button">保存</button></div>
+        </footer>
       </section>
     </div>
   );

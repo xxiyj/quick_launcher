@@ -1,7 +1,8 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { DataEnvelope, LauncherData, ResolvedTarget, TargetType, WorkspacePathResult } from "./types";
+import type { DataEnvelope, LauncherData, ResolvedTarget, TargetType, UpdateInfo, WorkspacePathResult } from "./types";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
+const browserPreviewDataKey = "quick-launcher-preview-data";
 
 export function assetUrl(path?: string): string | undefined {
   if (!path) return undefined;
@@ -10,36 +11,63 @@ export function assetUrl(path?: string): string | undefined {
 
 export async function loadData(): Promise<DataEnvelope> {
   if (!isTauri) {
+    const fallback: LauncherData = {
+      version: 2,
+      categories: [
+        { id: "work", name: "工作", color: "#2f80ed", order: 0 },
+        { id: "tools", name: "工具", color: "#27ae60", order: 1 },
+      ],
+      items: [],
+      settings: {
+        hotkey: "Ctrl+Space",
+        closeToTray: true,
+        autoStart: false,
+        autoHideAfterLaunch: true,
+        autoHideOnBlur: true,
+        autoSortByLaunchCount: true,
+        showCardMeta: true,
+        launchMode: "single",
+        theme: "light",
+        defaultMemoCategoryId: "work",
+      },
+    };
+    try {
+      const saved = window.localStorage.getItem(browserPreviewDataKey);
+      if (saved) {
+        return {
+          writable: true,
+          dataPath: "browser-preview",
+          data: JSON.parse(saved) as LauncherData,
+        };
+      }
+    } catch {
+      // Preview can still run when browser storage is unavailable.
+    }
     return {
       writable: true,
       dataPath: "browser-preview",
-      data: {
-        version: 2,
-        categories: [
-          { id: "work", name: "工作", color: "#2f80ed", order: 0 },
-          { id: "tools", name: "工具", color: "#27ae60", order: 1 },
-        ],
-        items: [],
-        settings: {
-          hotkey: "Ctrl+Space",
-          closeToTray: true,
-          autoStart: false,
-          autoHideAfterLaunch: true,
-          autoHideOnBlur: true,
-          autoSortByLaunchCount: true,
-          showCardMeta: true,
-          launchMode: "single",
-          defaultMemoCategoryId: "work",
-        },
-      },
+      data: fallback,
     };
   }
   return invoke<DataEnvelope>("load_data");
 }
 
 export async function saveData(data: LauncherData): Promise<void> {
-  if (!isTauri) return;
+  if (!isTauri) {
+    window.localStorage.setItem(browserPreviewDataKey, JSON.stringify(data));
+    return;
+  }
   await invoke("save_data", { data });
+}
+
+export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  if (!isTauri) return null;
+  return invoke<UpdateInfo | null>("check_for_update");
+}
+
+export async function installUpdate(version: string): Promise<void> {
+  if (!isTauri) return;
+  await invoke("install_update", { version });
 }
 
 export async function chooseTarget(targetType: TargetType): Promise<string | null> {

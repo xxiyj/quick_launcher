@@ -1,6 +1,6 @@
 [package]
 name = "quick-launcher"
-version = "1.11.0"
+version = "1.12.0"
 description = "A tidy Windows desktop launcher."
 authors = ["Codex"]
 edition = "2021"
@@ -20,6 +20,8 @@ tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
+semver = "1"
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

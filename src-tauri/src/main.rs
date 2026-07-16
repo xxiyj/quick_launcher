@@ -9,11 +9,11 @@ use std::{
 };
 use std::{
     fs,
-    io::{Error as IoError, ErrorKind},
+    io::{copy, Error as IoError, ErrorKind},
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -110,6 +110,8 @@ struct LauncherSettings {
     show_card_meta: bool,
     #[serde(default = "default_launch_mode")]
     launch_mode: LaunchMode,
+    #[serde(default = "default_theme")]
+    theme: Theme,
     #[serde(default)]
     default_memo_category_id: String,
     #[serde(default)]
@@ -125,6 +127,17 @@ enum LaunchMode {
 
 fn default_launch_mode() -> LaunchMode {
     LaunchMode::Single
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Theme {
+    Light,
+    Dark,
+}
+
+fn default_theme() -> Theme {
+    Theme::Light
 }
 
 fn default_true() -> bool {
@@ -179,6 +192,30 @@ struct WorkspacePathResult {
     path: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GiteeRelease {
+    tag_name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GiteeReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GiteeReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    version: String,
+    notes: String,
+}
+
 struct AppState {
     data_path: PathBuf,
     last_shortcut_at: Option<Instant>,
@@ -188,6 +225,10 @@ struct AppState {
 const SHORTCUT_DEBOUNCE: Duration = Duration::from_millis(350);
 const BLUR_HIDE_SUPPRESSION: Duration = Duration::from_millis(1500);
 const ALL_CATEGORY_ID: &str = "all";
+const GITEE_LATEST_RELEASE_URL: &str =
+    "https://gitee.com/api/v5/repos/capitalist/quick_launcher/releases/latest";
+const GITEE_RELEASE_DOWNLOAD_PREFIX: &str =
+    "https://gitee.com/capitalist/quick_launcher/releases/download/";
 
 fn main() {
     tauri::Builder::default()
@@ -255,6 +296,8 @@ fn main() {
             choose_icon,
             extract_icon,
             launch_target,
+            check_for_update,
+            install_update,
             update_hotkey,
             update_startup,
             show_main_window,
@@ -292,6 +335,7 @@ fn default_data() -> LauncherData {
             auto_sort_by_launch_count: true,
             show_card_meta: true,
             launch_mode: LaunchMode::Single,
+            theme: Theme::Light,
             default_memo_category_id: "default".into(),
             window_size: None,
         },
@@ -787,6 +831,226 @@ fn load_data(app: AppHandle) -> Result<DataEnvelope, String> {
 fn save_data(app: AppHandle, mut data: LauncherData) -> Result<(), String> {
     normalize_data(&mut data);
     write_data(&state_path(&app), &data)
+}
+
+fn update_http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(format!("Quick Launcher/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("无法创建更新请求：{error}"))
+}
+
+fn fetch_latest_release() -> Result<GiteeRelease, String> {
+    let response = update_http_client()?
+        .get(GITEE_LATEST_RELEASE_URL)
+        .send()
+        .map_err(|error| format!("检查更新失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("检查更新失败：{error}"))?;
+    let body = response
+        .text()
+        .map_err(|error| format!("无法读取更新信息：{error}"))?;
+    serde_json::from_str(&body).map_err(|error| format!("无法解析更新信息：{error}"))
+}
+
+fn release_version(release: &GiteeRelease) -> Result<semver::Version, String> {
+    let tag = release.tag_name.trim();
+    let version = tag
+        .strip_prefix('v')
+        .or_else(|| tag.strip_prefix('V'))
+        .unwrap_or(tag);
+    semver::Version::parse(version).map_err(|error| format!("更新版本号无效：{error}"))
+}
+
+fn current_version() -> semver::Version {
+    semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("Cargo package version must be valid semver")
+}
+
+fn portable_update_asset(release: &GiteeRelease) -> Result<&GiteeReleaseAsset, String> {
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case("quick-launcher.exe"))
+        .ok_or_else(|| "最新版本没有可直接更新的 quick-launcher.exe".into())
+}
+
+fn installer_update_asset(release: &GiteeRelease) -> Result<&GiteeReleaseAsset, String> {
+    release
+        .assets
+        .iter()
+        .find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.ends_with("-setup.exe") && name.contains("quick launcher")
+        })
+        .ok_or_else(|| "当前安装目录不可写，且最新版本没有可用安装包".into())
+}
+
+fn trusted_release_download_url(asset: &GiteeReleaseAsset) -> Result<&str, String> {
+    if !asset
+        .browser_download_url
+        .starts_with(GITEE_RELEASE_DOWNLOAD_PREFIX)
+    {
+        return Err("更新下载地址不受信任".into());
+    }
+    Ok(&asset.browser_download_url)
+}
+
+fn check_for_update_sync() -> Result<Option<UpdateInfo>, String> {
+    let release = fetch_latest_release()?;
+    if release.prerelease {
+        return Ok(None);
+    }
+    let latest = release_version(&release)?;
+    if latest <= current_version() {
+        return Ok(None);
+    }
+    trusted_release_download_url(portable_update_asset(&release)?)?;
+    Ok(Some(UpdateInfo {
+        version: latest.to_string(),
+        notes: release.body.trim().to_string(),
+    }))
+}
+
+#[tauri::command]
+async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
+    tauri::async_runtime::spawn_blocking(check_for_update_sync)
+        .await
+        .map_err(|error| format!("检查更新任务失败：{error}"))?
+}
+
+fn download_release_asset(url: &str, output: &Path) -> Result<(), String> {
+    let mut response = update_http_client()?
+        .get(url)
+        .send()
+        .map_err(|error| format!("下载更新失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("下载更新失败：{error}"))?;
+    let mut file =
+        fs::File::create(output).map_err(|error| format!("无法创建更新文件：{error}"))?;
+    copy(&mut response, &mut file).map_err(|error| format!("写入更新文件失败：{error}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_parent_writable(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let probe = parent.join(format!(
+        ".quick-launcher-update-{}-{stamp}.tmp",
+        std::process::id()
+    ));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(windows)]
+fn escape_batch_path(path: &Path) -> String {
+    path.to_string_lossy().replace('%', "%%")
+}
+
+#[cfg(windows)]
+fn schedule_windows_update(
+    current_exe: &Path,
+    downloaded: &Path,
+    use_installer: bool,
+) -> Result<(), String> {
+    let script = downloaded
+        .parent()
+        .ok_or_else(|| "无法创建更新脚本".to_string())?
+        .join("apply-update.cmd");
+    let current = escape_batch_path(current_exe);
+    let downloaded = escape_batch_path(downloaded);
+    let commands = if use_installer {
+        format!("start \"\" /wait \"{downloaded}\" /S\r\nstart \"\" \"{current}\"\r\n")
+    } else {
+        format!("copy /Y \"{downloaded}\" \"{current}\" >nul\r\nstart \"\" \"{current}\"\r\n")
+    };
+    fs::write(
+        &script,
+        format!("@echo off\r\nping 127.0.0.1 -n 3 >nul\r\n{commands}del \"%~f0\"\r\n"),
+    )
+    .map_err(|error| format!("无法写入更新脚本：{error}"))?;
+    Command::new("cmd")
+        .arg("/C")
+        .arg("call")
+        .arg(&script)
+        .spawn()
+        .map_err(|error| format!("无法启动更新程序：{error}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prepare_update(requested_version: &str) -> Result<(), String> {
+    let release = fetch_latest_release()?;
+    let latest = release_version(&release)?;
+    let requested = semver::Version::parse(requested_version.trim())
+        .map_err(|error| format!("请求的更新版本无效：{error}"))?;
+    if release.prerelease || latest != requested || latest <= current_version() {
+        return Err("更新信息已变化，请重新检查更新".into());
+    }
+
+    let current_exe =
+        std::env::current_exe().map_err(|error| format!("无法定位当前程序：{error}"))?;
+    let use_installer = !is_parent_writable(&current_exe);
+    let asset = if use_installer {
+        installer_update_asset(&release)?
+    } else {
+        portable_update_asset(&release)?
+    };
+    let url = trusted_release_download_url(asset)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let update_dir = std::env::temp_dir().join(format!(
+        "quick-launcher-update-{}-{}-{stamp}",
+        latest,
+        std::process::id()
+    ));
+    fs::create_dir_all(&update_dir).map_err(|error| format!("无法创建更新目录：{error}"))?;
+    let download_path = update_dir.join(if use_installer {
+        "setup.exe"
+    } else {
+        "quick-launcher.exe"
+    });
+    if let Err(error) = download_release_asset(url, &download_path) {
+        let _ = fs::remove_dir_all(&update_dir);
+        return Err(error);
+    }
+    schedule_windows_update(&current_exe, &download_path, use_installer)
+}
+
+#[cfg(not(windows))]
+fn prepare_update(_requested_version: &str) -> Result<(), String> {
+    Err("自动更新仅支持 Windows".into())
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle, version: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || prepare_update(&version))
+        .await
+        .map_err(|error| format!("更新任务失败：{error}"))??;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        app.exit(0);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1469,6 +1733,24 @@ mod tests {
     }
 
     #[test]
+    fn release_update_requires_a_newer_trusted_executable() {
+        let release = GiteeRelease {
+            tag_name: "v1.13.0".into(),
+            body: String::new(),
+            prerelease: false,
+            assets: vec![GiteeReleaseAsset {
+                name: "quick-launcher.exe".into(),
+                browser_download_url: format!(
+                    "{GITEE_RELEASE_DOWNLOAD_PREFIX}v1.13.0/quick-launcher.exe"
+                ),
+            }],
+        };
+
+        assert!(release_version(&release).unwrap() > current_version());
+        assert!(trusted_release_download_url(portable_update_asset(&release).unwrap()).is_ok());
+    }
+
+    #[test]
     fn legacy_data_migrates_to_workspace_nodes() {
         let mut data: LauncherData = serde_json::from_value(serde_json::json!({
             "version": 1,
@@ -1502,6 +1784,7 @@ mod tests {
         assert_eq!(data.version, 2);
         assert_eq!(data.settings.default_memo_category_id, "current");
         assert!(data.settings.show_card_meta);
+        assert!(matches!(data.settings.theme, Theme::Light));
         assert_eq!(data.items[0].kind, ItemKind::Launcher);
         assert_eq!(data.items[0].parent_id, None);
         assert_eq!(data.items[0].category_id, "current");
@@ -1509,6 +1792,18 @@ mod tests {
             data.items[0].target_type,
             Some(TargetType::Program)
         ));
+    }
+
+    #[test]
+    fn theme_is_saved_and_restored() {
+        let mut data = default_data();
+        data.settings.theme = Theme::Dark;
+
+        let value = serde_json::to_value(&data).unwrap();
+        assert_eq!(value["settings"]["theme"], "dark");
+
+        let restored: LauncherData = serde_json::from_value(value).unwrap();
+        assert!(matches!(restored.settings.theme, Theme::Dark));
     }
 
     #[test]
