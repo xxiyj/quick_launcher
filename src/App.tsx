@@ -33,6 +33,7 @@ import {
   Link2,
   Maximize2,
   Minus,
+  MousePointer2,
   Moon,
   Play,
   Plus,
@@ -1546,6 +1547,7 @@ export default function App() {
                       <button className="ghost" onClick={openShortcutDraft} type="button"><Link2 size={18} />添加快捷方式</button>
                       <button className="primary" onClick={openNewMemo} type="button"><StickyNote size={18} />新建备忘录</button>
                     </div>
+                    {!query ? <span className="empty-drop-hint"><MousePointer2 size={15} />可直接拖入快捷方式</span> : null}
                   </div>
                 ) : null}
               </section>

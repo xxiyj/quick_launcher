@@ -755,6 +755,19 @@ button {
   gap: 10px;
 }
 
+.empty-drop-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  color: #8390a4;
+  font-size: 12px;
+}
+
+.empty-drop-hint svg {
+  color: #2f80ed;
+}
+
 .empty-icon {
   width: 52px;
   height: 52px;
@@ -1522,7 +1535,6 @@ button {
 .theme-dark .category.active,
 .theme-dark .sidebar-add-category:hover,
 .theme-dark .toolbar-action:hover,
-.theme-dark .app-name,
 .theme-dark .empty h2,
 .theme-dark .hotkey-capture,
 .theme-dark .segmented button.active {
@@ -1639,8 +1651,30 @@ button {
 }
 
 .theme-dark .app-icon {
-  color: #6fa6e8;
-  background: #273244;
+  color: #7797bd;
+  background: #263142;
+}
+
+.theme-dark .app-icon img {
+  opacity: 0.86;
+  filter: saturate(0.78) brightness(0.9);
+}
+
+.theme-dark .app-name {
+  color: #bec8d4;
+  font-weight: 600;
+}
+
+.theme-dark .app-meta {
+  color: #8795a7;
+}
+
+.theme-dark .empty-drop-hint {
+  color: #9eacbe;
+}
+
+.theme-dark .empty-drop-hint svg {
+  color: #8fb6e8;
 }
 
 .theme-dark .app-meta i {
@@ -1789,7 +1823,7 @@ button {
 }
 
 .theme-dark .workspace-folder-card .app-icon {
-  color: #f0bd58;
+  color: #c69b58;
   background: #3e3420;
 }
 
