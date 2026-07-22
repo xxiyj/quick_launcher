@@ -26,6 +26,7 @@ export interface LauncherItem {
   categoryId: string;
   parentId?: string | null;
   iconPath?: string;
+  shortcutPath?: string;
   schedule?: LaunchSchedule;
   searchKey: string;
   order: number;
@@ -90,6 +91,8 @@ export interface ItemDraft {
   categoryId: string;
   parentId?: string | null;
   iconPath?: string;
+  shortcutPath?: string;
+  sourceShortcutPath?: string;
 }
 
 export interface WorkspacePathResult {

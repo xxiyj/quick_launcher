@@ -73,6 +73,8 @@ struct LauncherItem {
     #[serde(default)]
     parent_id: Option<String>,
     icon_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shortcut_path: Option<String>,
     #[serde(default)]
     schedule: Option<LaunchSchedule>,
     search_key: String,
@@ -263,6 +265,7 @@ const SHORTCUT_DEBOUNCE: Duration = Duration::from_millis(350);
 const BLUR_HIDE_SUPPRESSION: Duration = Duration::from_millis(1500);
 const ALL_CATEGORY_ID: &str = "all";
 const DEFAULT_HOTKEY: &str = "Alt+R";
+const INTERNAL_SHORTCUTS_DIR: &str = ".quick-launcher-shortcuts";
 const GITEE_LATEST_RELEASE_URL: &str =
     "https://gitee.com/api/v5/repos/capitalist/quick_launcher/releases/latest";
 const GITEE_RELEASE_DOWNLOAD_PREFIX: &str =
@@ -351,6 +354,7 @@ fn main() {
             save_memo,
             move_workspace_file,
             create_workspace_shortcut,
+            backup_shortcut,
             recycle_workspace_path
         ])
         .run(tauri::generate_context!())
@@ -769,6 +773,58 @@ fn move_file_to_directory(source: &Path, destination: &Path) -> Result<PathBuf, 
     Ok(output)
 }
 
+fn copy_shortcut_to_directory(
+    source: &Path,
+    destination: &Path,
+    name: &str,
+) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err("快捷方式文件不存在".into());
+    }
+    if !destination.is_dir() {
+        return Err("快捷方式备份目录不可用".into());
+    }
+    let output = unique_workspace_path(destination, name, Some("lnk"), None)?;
+    fs::copy(source, &output).map_err(|error| error.to_string())?;
+    Ok(output)
+}
+
+fn internal_shortcuts_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = canonical_workspace_root(app)?;
+    let directory = root.join(INTERNAL_SHORTCUTS_DIR);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
+    if paths_equal(&directory, &root) || !directory.starts_with(&root) {
+        return Err("快捷方式备份目录不在应用工作区中".into());
+    }
+    Ok(directory)
+}
+
+#[tauri::command]
+fn backup_shortcut(
+    app: AppHandle,
+    source_path: String,
+    name: String,
+) -> Result<WorkspacePathResult, String> {
+    let source_path = sanitize_path(&source_path);
+    if !is_shortcut_path(&source_path) {
+        return Err("只能备份 Windows 快捷方式文件".into());
+    }
+    let source =
+        fs::canonicalize(&source_path).map_err(|error| format!("快捷方式文件不可用：{error}"))?;
+    if !source.is_file() {
+        return Err("快捷方式文件不存在".into());
+    }
+
+    let root = canonical_workspace_root(&app)?;
+    if source.starts_with(&root) && !paths_equal(&source, &root) {
+        return Ok(workspace_path_result(source));
+    }
+
+    let destination = internal_shortcuts_directory(&app)?;
+    copy_shortcut_to_directory(&source, &destination, &name).map(workspace_path_result)
+}
+
 #[tauri::command]
 fn create_workspace_shortcut(
     app: AppHandle,
@@ -780,7 +836,20 @@ fn create_workspace_shortcut(
     let destination = workspace_parent_path(&app, destination_path)?;
 
     let source_path = sanitize_path(&source_path);
-    if is_shortcut_path(&source_path) || is_internet_shortcut_path(&source_path) {
+    if is_shortcut_path(&source_path) {
+        if let Ok(managed_shortcut) = workspace_entry_path(&app, &source_path) {
+            if managed_shortcut.is_file() {
+                return move_file_to_directory(&managed_shortcut, &destination)
+                    .map(workspace_path_result);
+            }
+        }
+
+        let source = fs::canonicalize(&source_path)
+            .map_err(|error| format!("快捷方式文件不可用：{error}"))?;
+        return copy_shortcut_to_directory(&source, &destination, &name).map(workspace_path_result);
+    }
+
+    if is_internet_shortcut_path(&source_path) {
         if let Ok(managed_shortcut) = workspace_entry_path(&app, &source_path) {
             if managed_shortcut.is_file() {
                 return move_file_to_directory(&managed_shortcut, &destination)
@@ -1668,8 +1737,18 @@ fn hicon_to_png(
 }
 
 #[tauri::command]
-fn launch_target(path: String, args: String, target_type: TargetType) -> Result<(), String> {
-    launch_target_native(sanitize_path(&path), args, target_type)
+fn launch_target(
+    path: String,
+    args: String,
+    target_type: TargetType,
+    shortcut_path: Option<String>,
+) -> Result<(), String> {
+    launch_target_native(
+        sanitize_path(&path),
+        args,
+        target_type,
+        shortcut_path.map(|path| sanitize_path(&path)),
+    )
 }
 
 fn directory_from_path(path: &Path) -> Result<PathBuf, String> {
@@ -1758,7 +1837,11 @@ fn open_program_in_terminal_native(directory: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn launch_target_native(path: String, args: String, target_type: TargetType) -> Result<(), String> {
+fn shell_execute_target_native(
+    path: &str,
+    args: &str,
+    target_type: &TargetType,
+) -> Result<(), isize> {
     let file = wide_path(&path);
     let params = if matches!(target_type, TargetType::Program) && !args.trim().is_empty() {
         Some(wide_path(args.trim()))
@@ -1766,7 +1849,7 @@ fn launch_target_native(path: String, args: String, target_type: TargetType) -> 
         None
     };
     let working_dir = if matches!(target_type, TargetType::Program) {
-        Path::new(&path)
+        Path::new(path)
             .parent()
             .map(|dir| wide_path(&dir.to_string_lossy()))
     } else {
@@ -1790,14 +1873,61 @@ fn launch_target_native(path: String, args: String, target_type: TargetType) -> 
     };
     let code = result.0 as isize;
     if code <= 32 {
-        Err(format!("ShellExecute failed with code {code}"))
+        Err(code)
     } else {
         Ok(())
     }
 }
 
+#[cfg(windows)]
+fn shell_execute_failure_message(path: &str, code: isize) -> String {
+    let reason = match code {
+        2 => "找不到目标文件或路径",
+        3 => "找不到目标目录",
+        5 => "访问被拒绝",
+        31 => "没有可用于打开该目标的关联程序",
+        _ => "Windows 无法启动该目标",
+    };
+    format!("{reason}：{path}（ShellExecute 错误代码 {code}）")
+}
+
+#[cfg(windows)]
+fn launch_target_native(
+    path: String,
+    args: String,
+    target_type: TargetType,
+    shortcut_path: Option<String>,
+) -> Result<(), String> {
+    let primary_error = match shell_execute_target_native(&path, &args, &target_type) {
+        Ok(()) => return Ok(()),
+        Err(code) => code,
+    };
+
+    let fallback = shortcut_path
+        .filter(|shortcut_path| !shortcut_path.trim().is_empty())
+        .filter(|shortcut_path| !paths_equal(Path::new(shortcut_path), Path::new(&path)));
+    if let Some(fallback) = fallback {
+        match shell_execute_target_native(&fallback, "", &TargetType::Shortcut) {
+            Ok(()) => return Ok(()),
+            Err(fallback_error) => {
+                return Err(format!(
+                    "{}；应用内快捷方式备份也无法启动（ShellExecute 错误代码 {fallback_error}）",
+                    shell_execute_failure_message(&path, primary_error)
+                ));
+            }
+        }
+    }
+
+    Err(shell_execute_failure_message(&path, primary_error))
+}
+
 #[cfg(not(windows))]
-fn launch_target_native(path: String, args: String, target_type: TargetType) -> Result<(), String> {
+fn launch_target_native(
+    path: String,
+    args: String,
+    target_type: TargetType,
+    _shortcut_path: Option<String>,
+) -> Result<(), String> {
     match target_type {
         TargetType::Folder => {
             Command::new("explorer")
@@ -2121,6 +2251,7 @@ mod tests {
             data.items[0].target_type,
             Some(TargetType::Program)
         ));
+        assert!(data.items[0].shortcut_path.is_none());
     }
 
     #[test]
@@ -2227,6 +2358,53 @@ mod tests {
         assert_eq!(fs::read_to_string(&output).unwrap(), "# test");
         assert_eq!(output.parent(), Some(destination_directory.as_path()));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn external_shortcuts_are_copied_without_removing_the_source() {
+        let unique = format!(
+            "quick-launcher-shortcut-copy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        let source_directory = directory.join("desktop");
+        let destination_directory = directory.join("workspace");
+        fs::create_dir_all(&source_directory).unwrap();
+        fs::create_dir_all(&destination_directory).unwrap();
+        let source = source_directory.join("Example.lnk");
+        fs::write(&source, "shortcut contents").unwrap();
+
+        let first = copy_shortcut_to_directory(&source, &destination_directory, "Example").unwrap();
+        let second =
+            copy_shortcut_to_directory(&source, &destination_directory, "Example").unwrap();
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), "shortcut contents");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "shortcut contents");
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("Example.lnk")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("Example (2).lnk")
+        );
+        fs::remove_file(&source).unwrap();
+        assert!(!source.exists());
+        assert!(first.exists());
+        assert!(second.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_execute_errors_describe_missing_targets() {
+        let message = shell_execute_failure_message("C:\\Missing\\app.exe", 2);
+        assert!(message.contains("找不到目标文件或路径"));
+        assert!(message.contains("错误代码 2"));
     }
 
     #[test]

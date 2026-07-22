@@ -713,6 +713,15 @@ button {
   background: rgba(47, 128, 237, 0.09);
 }
 
+.card-context-menu .context-menu-danger {
+  color: #c73636;
+}
+
+.card-context-menu .context-menu-danger:hover {
+  color: #a62727;
+  background: rgba(199, 54, 54, 0.1);
+}
+
 .context-menu-divider {
   height: 1px;
   margin: 5px 6px;
@@ -1485,7 +1494,7 @@ button {
 }
 
 .theme-dark {
-  color: #e8edf5;
+  color: #d7dde6;
   color-scheme: dark;
   background:
     linear-gradient(180deg, rgba(31, 39, 52, 0.98), rgba(20, 26, 35, 0.98)),
@@ -1497,7 +1506,7 @@ button {
 }
 
 .theme-dark .window-controls button {
-  color: #b8c4d6;
+  color: #aab5c5;
 }
 
 .theme-dark .window-controls button:hover {
@@ -1517,7 +1526,7 @@ button {
 .theme-dark .empty h2,
 .theme-dark .hotkey-capture,
 .theme-dark .segmented button.active {
-  color: #f3f6fb;
+  color: #e0e6ee;
 }
 
 .theme-dark .brand-copy span,
@@ -1540,7 +1549,7 @@ button {
 .theme-dark .memo-body label,
 .theme-dark .breadcrumb,
 .theme-dark .markdown-preview blockquote {
-  color: #aebbd0;
+  color: #9eacbe;
 }
 
 .theme-dark .category:hover,
@@ -1558,7 +1567,7 @@ button {
 }
 
 .theme-dark .category b {
-  color: #8e9db2;
+  color: #8795a8;
 }
 
 .theme-dark .search input,
@@ -1573,7 +1582,7 @@ button {
 .theme-dark .memo-body textarea,
 .theme-dark .markdown-preview,
 .theme-dark .hotkey-capture {
-  color: #e8edf5;
+  color: #d7dde6;
   border-color: rgba(205, 217, 235, 0.16);
   background: rgba(31, 41, 55, 0.96);
 }
@@ -1589,7 +1598,7 @@ button {
 
 .theme-dark .sidebar-category-editor input,
 .theme-dark .sidebar-category-create input {
-  color: #e8edf5;
+  color: #d7dde6;
   border-color: rgba(104, 163, 240, 0.5);
   background: rgba(25, 34, 46, 0.98);
 }
@@ -1630,7 +1639,7 @@ button {
 }
 
 .theme-dark .app-icon {
-  color: #73afff;
+  color: #6fa6e8;
   background: #273244;
 }
 
@@ -1644,7 +1653,7 @@ button {
 }
 
 .theme-dark .schedule-badge {
-  color: #9dc5ff;
+  color: #8fb6e8;
   border-color: rgba(104, 163, 240, 0.4);
   background: rgba(47, 128, 237, 0.2);
 }
@@ -1656,12 +1665,21 @@ button {
 }
 
 .theme-dark .card-context-menu button {
-  color: #b8c4d6;
+  color: #aab5c5;
 }
 
 .theme-dark .card-context-menu button:hover {
-  color: #f3f6fb;
+  color: #e0e6ee;
   background: rgba(104, 163, 240, 0.18);
+}
+
+.theme-dark .card-context-menu .context-menu-danger {
+  color: #ef9a9a;
+}
+
+.theme-dark .card-context-menu .context-menu-danger:hover {
+  color: #ffc1c1;
+  background: rgba(202, 67, 67, 0.24);
 }
 
 .theme-dark .context-menu-divider {
@@ -1671,7 +1689,7 @@ button {
 .theme-dark .status button:hover,
 .theme-dark .breadcrumb button:hover,
 .theme-dark .update-link:hover:not(:disabled) {
-  color: #73afff;
+  color: #6fa6e8;
 }
 
 .theme-dark .modal {
@@ -1685,7 +1703,7 @@ button {
 }
 
 .theme-dark .modal header button {
-  color: #b8c4d6;
+  color: #aab5c5;
   background: rgba(43, 55, 72, 0.96);
 }
 
@@ -1705,7 +1723,7 @@ button {
 }
 
 .theme-dark .settings-about {
-  color: #9aa9bf;
+  color: #94a2b4;
 }
 
 .theme-dark .update-link {
@@ -1718,7 +1736,7 @@ button {
 }
 
 .theme-dark .segmented button {
-  color: #aebbd0;
+  color: #9eacbe;
 }
 
 .theme-dark .segmented button.active {
@@ -1727,13 +1745,13 @@ button {
 }
 
 .theme-dark .schedule-field {
-  color: #aebbd0;
+  color: #9eacbe;
 }
 
 .theme-dark .interval-presets button,
 .theme-dark .schedule-time-row button,
 .theme-dark .schedule-add-time {
-  color: #b8c4d6;
+  color: #aab5c5;
   border-color: rgba(205, 217, 235, 0.16);
   background: rgba(31, 41, 55, 0.94);
 }
@@ -1741,31 +1759,31 @@ button {
 .theme-dark .interval-presets button:hover:not(:disabled),
 .theme-dark .schedule-time-row button:hover:not(:disabled),
 .theme-dark .schedule-add-time:hover:not(:disabled) {
-  color: #f3f6fb;
+  color: #e0e6ee;
   border-color: rgba(104, 163, 240, 0.44);
   background: #293749;
 }
 
 .theme-dark .interval-presets button.active {
-  color: #9dc5ff;
+  color: #8fb6e8;
   border-color: rgba(104, 163, 240, 0.6);
   background: rgba(47, 128, 237, 0.2);
 }
 
 .theme-dark .weekday-picker button {
-  color: #b8c4d6;
+  color: #aab5c5;
   border-color: rgba(205, 217, 235, 0.16);
   background: rgba(31, 41, 55, 0.94);
 }
 
 .theme-dark .weekday-picker button:hover:not(:disabled) {
-  color: #f3f6fb;
+  color: #e0e6ee;
   border-color: rgba(104, 163, 240, 0.44);
   background: #293749;
 }
 
 .theme-dark .weekday-picker button.active {
-  color: #9dc5ff;
+  color: #8fb6e8;
   border-color: rgba(104, 163, 240, 0.6);
   background: rgba(47, 128, 237, 0.2);
 }
@@ -1805,6 +1823,6 @@ button {
 }
 
 .theme-dark option {
-  color: #e8edf5;
+  color: #d7dde6;
   background: #1f2937;
 }

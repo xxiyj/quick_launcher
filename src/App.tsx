@@ -54,6 +54,7 @@ import packageJson from "../package.json";
 import { buildSearchKey, matchesSearch } from "./search";
 import {
   assetUrl,
+  backupShortcut,
   checkForUpdate,
   chooseIcon,
   chooseTarget,
@@ -707,7 +708,7 @@ export default function App() {
       if (source.kind === "memo") {
         result = await moveWorkspaceFile(source.path, destination.path);
       } else if (isLauncher(source)) {
-        result = await createWorkspaceShortcut(source.path, source.args, destination.path, source.name);
+        result = await createWorkspaceShortcut(source.shortcutPath ?? source.path, source.args, destination.path, source.name);
       } else {
         return;
       }
@@ -723,6 +724,7 @@ export default function App() {
               path: result.path,
               args: "",
               targetType: item.targetType === "url" ? "url" : "shortcut",
+              shortcutPath: undefined,
               parentId: destination.id,
               categoryId: destination.categoryId,
               searchKey: buildSearchKey(item.name, result.path),
@@ -790,6 +792,7 @@ export default function App() {
       name: inferName(path),
       path,
       targetType: inferType(path),
+      sourceShortcutPath: isShortcutPath(path) ? path : undefined,
       categoryId: selectedCategoryId(),
       parentId: currentFolder?.id ?? null,
     };
@@ -836,6 +839,17 @@ export default function App() {
   async function hydrateItemFromPath(originalPath: string, itemId: string) {
     try {
       const imported = await importTarget(originalPath);
+      const sourceShortcutPath = isShortcutPath(originalPath) ? originalPath : undefined;
+      const duplicateBeforeBackup = data.items.some(
+        (item) => item.id !== itemId && item.kind === "launcher" && item.path.toLowerCase() === imported.path.toLowerCase(),
+      );
+      if (duplicateBeforeBackup) {
+        setData((current) => ({ ...current, items: current.items.filter((item) => item.id !== itemId) }));
+        return;
+      }
+      const shortcutPath = sourceShortcutPath
+        ? (await backupShortcut(sourceShortcutPath, imported.displayName)).path
+        : undefined;
       let shouldExtractIcon = false;
       setData((current) => {
         const duplicate = current.items.some(
@@ -853,6 +867,7 @@ export default function App() {
                   path: imported.path,
                   args: item.args || imported.args,
                   targetType: imported.targetType,
+                  shortcutPath,
                   searchKey: buildSearchKey(imported.displayName, `${imported.path} ${imported.args}`),
                   updatedAt: new Date().toISOString(),
                 }
@@ -881,6 +896,7 @@ export default function App() {
           path: imported.path,
           args: imported.args,
           targetType: imported.targetType,
+          sourceShortcutPath: isShortcutPath(path) ? path : undefined,
           categoryId: selectedCategoryId(),
           parentId: currentFolder?.id ?? null,
         });
@@ -1001,6 +1017,7 @@ export default function App() {
         categoryId: item.categoryId,
         parentId: item.parentId ?? null,
         iconPath: item.iconPath,
+        shortcutPath: item.shortcutPath,
       });
       return;
     }
@@ -1019,6 +1036,8 @@ export default function App() {
       name: current?.name || inferName(path),
       path,
       targetType: inferType(path),
+      sourceShortcutPath: isShortcutPath(path) ? path : undefined,
+      shortcutPath: undefined,
       categoryId: current?.categoryId || selectedCategoryId(),
     }));
     try {
@@ -1029,6 +1048,8 @@ export default function App() {
         args: current?.args || imported.args,
         name: current?.name || imported.displayName,
         targetType: imported.targetType,
+        sourceShortcutPath: isShortcutPath(path) ? path : undefined,
+        shortcutPath: undefined,
         categoryId: current?.categoryId || selectedCategoryId(),
       }));
     } catch {
@@ -1094,17 +1115,39 @@ export default function App() {
     let path = draft.path.trim();
     let args = draft.args.trim();
     let targetType = draft.targetType;
+    const sourceShortcutPath = draft.sourceShortcutPath
+      ?? (draft.targetType === "shortcut" && isShortcutPath(path) ? path : undefined);
+    let shortcutPath = existing?.shortcutPath;
     if (shouldPlaceInFolder) {
       try {
         setStatus("正在放入文件夹...");
-        const result = await createWorkspaceShortcut(path, args, parent?.path ?? null, draft.name.trim());
+        const result = await createWorkspaceShortcut(sourceShortcutPath ?? path, args, parent?.path ?? null, draft.name.trim());
         path = result.path;
         args = "";
         targetType = draft.targetType === "url" ? "url" : "shortcut";
+        shortcutPath = undefined;
       } catch (error) {
         setStatus(`放入文件夹失败：${String(error)}`);
         return;
       }
+    } else if (sourceShortcutPath) {
+      try {
+        const imported = await importTarget(sourceShortcutPath);
+        path = imported.path;
+        args = imported.args;
+        targetType = imported.targetType;
+        shortcutPath = (await backupShortcut(sourceShortcutPath, draft.name.trim())).path;
+      } catch (error) {
+        setStatus(`快捷方式备份失败：${String(error)}`);
+        return;
+      }
+    } else if (
+      !existing
+      || existing.path !== path
+      || existing.args !== args
+      || existing.targetType !== targetType
+    ) {
+      shortcutPath = undefined;
     }
     const item: LauncherItem = {
       id: itemId,
@@ -1116,6 +1159,7 @@ export default function App() {
       categoryId: parent?.categoryId ?? draft.categoryId ?? selectedCategoryId(),
       parentId,
       iconPath,
+      shortcutPath,
       searchKey: buildSearchKey(draft.name, `${path} ${args}`),
       order: existing?.order ?? data.items.length,
       launchCount: existing?.launchCount ?? 0,
@@ -1257,7 +1301,13 @@ export default function App() {
           ? current.items.map((node) => {
               if (node.id === item.id) return item;
               if (folderDraft.path && node.id !== item.id) {
-                return { ...node, path: replacePathPrefix(node.path, folderDraft.path, result.path) };
+                return {
+                  ...node,
+                  path: replacePathPrefix(node.path, folderDraft.path, result.path),
+                  shortcutPath: node.shortcutPath
+                    ? replacePathPrefix(node.shortcutPath, folderDraft.path, result.path)
+                    : undefined,
+                };
               }
               return node;
             })
@@ -1280,8 +1330,14 @@ export default function App() {
 
   async function removeNode(item: LauncherItem) {
     try {
-      await recycleWorkspacePath(item.path);
       const removedIds = item.kind === "workspaceFolder" ? collectDescendantIds(data.items, item.id) : new Set([item.id]);
+      const managedPaths = [...new Set(
+        data.items
+          .filter((node) => removedIds.has(node.id))
+          .flatMap((node) => [node.path, node.shortcutPath])
+          .filter((path): path is string => Boolean(path)),
+      )];
+      for (const path of managedPaths) await recycleWorkspacePath(path);
       persist((current) => ({ ...current, items: current.items.filter((node) => !removedIds.has(node.id)) }));
       if (currentFolderId && removedIds.has(currentFolderId)) setCurrentFolderId(null);
       setDraft(null);
@@ -1309,7 +1365,7 @@ export default function App() {
   async function runItem(item: LauncherItem, source: "manual" | "scheduled" = "manual") {
     if (!isLauncher(item)) return;
     try {
-      await launchTarget(item.path, item.args, item.targetType);
+      await launchTarget(item.path, item.args, item.targetType, item.shortcutPath);
       persist((current) => ({
         ...current,
         items: current.items.map((value) =>
@@ -1330,7 +1386,7 @@ export default function App() {
 
   function openCardContextMenu(item: LauncherItem, x: number, y: number) {
     const width = 218;
-    const height = 188;
+    const height = isLauncher(item) ? (item.targetType === "url" ? 150 : 270) : 100;
     setCardContextMenu({
       item,
       x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
@@ -1351,6 +1407,12 @@ export default function App() {
   function openSchedule(item: LauncherItem) {
     if (!isLauncher(item) || item.targetType === "url") return;
     setScheduleDraft({ itemId: item.id, ...normalizeLaunchSchedule(item.schedule) });
+  }
+
+  function editNode(item: LauncherItem) {
+    if (item.kind === "workspaceFolder") openFolderEditor(item);
+    else if (item.kind === "memo") void openMemo(item);
+    else openLaunchDraft(item);
   }
 
   function saveSchedule() {
@@ -1468,11 +1530,7 @@ export default function App() {
                     key={item.id}
                     launchMode={data.settings.launchMode}
                     showCardMeta={data.settings.showCardMeta}
-                    onEdit={() => {
-                      if (item.kind === "workspaceFolder") openFolderEditor(item);
-                      else if (item.kind === "memo") void openMemo(item);
-                      else openLaunchDraft(item);
-                    }}
+                    onEdit={() => editNode(item)}
                     onOpenFolder={() => enterFolder(item)}
                     onOpenMemo={() => void openMemo(item)}
                     onOpenContextMenu={openCardContextMenu}
@@ -1566,6 +1624,8 @@ export default function App() {
         <CardContextMenu
           item={cardContextMenu.item}
           onClose={() => setCardContextMenu(null)}
+          onDelete={() => requestRemoveNode(cardContextMenu.item)}
+          onEdit={() => editNode(cardContextMenu.item)}
           onOpenExplorer={() => void openProgramDirectory(cardContextMenu.item, "explorer")}
           onOpenTerminal={() => void openProgramDirectory(cardContextMenu.item, "terminal")}
           onRun={() => void runItem(cardContextMenu.item)}
@@ -1866,7 +1926,6 @@ function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit,
       className={`app-card ${folder ? "workspace-folder-card" : ""} ${hasSchedule ? "has-schedule" : ""} ${isDragging ? "drag-sorting" : ""} ${isOverFolder ? "folder-drop-target" : ""}`}
       onDoubleClick={isLauncher(item) && launchMode === "double" ? onRun : undefined}
       onContextMenu={(event) => {
-        if (!isLauncher(item) || item.targetType === "url") return;
         event.preventDefault();
         event.stopPropagation();
         onOpenContextMenu(item, event.clientX, event.clientY);
@@ -1893,6 +1952,8 @@ function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit,
 interface CardContextMenuProps {
   item: LauncherItem;
   onClose: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
   onOpenExplorer: () => void;
   onOpenTerminal: () => void;
   onRun: () => void;
@@ -1901,19 +1962,28 @@ interface CardContextMenuProps {
   y: number;
 }
 
-function CardContextMenu({ item, onClose, onOpenExplorer, onOpenTerminal, onRun, onSchedule, x, y }: CardContextMenuProps) {
+function CardContextMenu({ item, onClose, onDelete, onEdit, onOpenExplorer, onOpenTerminal, onRun, onSchedule, x, y }: CardContextMenuProps) {
   function invoke(action: () => void) {
     onClose();
     action();
   }
 
+  const launcher = isLauncher(item);
+  const canOpenLocation = launcher && item.targetType !== "url";
+  const canSchedule = canOpenLocation;
+
   return (
     <div aria-label={`${item.name} 操作菜单`} className="card-context-menu" onContextMenu={(event) => event.preventDefault()} onPointerDown={(event) => event.stopPropagation()} role="menu" style={{ left: x, top: y }}>
-      <button onClick={() => invoke(onRun)} role="menuitem" type="button"><Play size={16} />运行</button>
-      <button onClick={() => invoke(onSchedule)} role="menuitem" type="button"><Clock3 size={16} />定时启动</button>
+      {launcher ? <button onClick={() => invoke(onRun)} role="menuitem" type="button"><Play size={16} />运行</button> : null}
+      {canSchedule ? <button onClick={() => invoke(onSchedule)} role="menuitem" type="button"><Clock3 size={16} />定时启动</button> : null}
+      {canOpenLocation ? <>
+        <span className="context-menu-divider" />
+        <button onClick={() => invoke(onOpenExplorer)} role="menuitem" type="button"><FolderOpen size={16} />用资源管理器打开</button>
+        <button onClick={() => invoke(onOpenTerminal)} role="menuitem" type="button"><Terminal size={16} />在终端中打开</button>
+      </> : null}
       <span className="context-menu-divider" />
-      <button onClick={() => invoke(onOpenExplorer)} role="menuitem" type="button"><FolderOpen size={16} />用资源管理器打开</button>
-      <button onClick={() => invoke(onOpenTerminal)} role="menuitem" type="button"><Terminal size={16} />在终端中打开</button>
+      <button onClick={() => invoke(onEdit)} role="menuitem" type="button"><Edit3 size={16} />编辑</button>
+      <button className="context-menu-danger" onClick={() => invoke(onDelete)} role="menuitem" type="button"><Trash2 size={16} />删除</button>
     </div>
   );
 }
@@ -1991,9 +2061,21 @@ function ItemModal({ categories, draft, folders, onChange, onClose, onDelete, on
             const folder = folders.find((item) => item.id === parentId);
             onChange({ ...draft, parentId, categoryId: folder?.categoryId ?? draft.categoryId });
           }}><option value="">分组根目录</option>{availableFolders.map((folder) => <option key={folder.id} value={folder.id}>{folderPathLabel(folder, folders)}</option>)}</select></label>
-          <label>类型<select value={draft.targetType} onChange={(event) => onChange({ ...draft, targetType: event.target.value as TargetType })}><option value="program">程序</option><option value="shortcut">快捷方式</option><option value="folder">系统文件夹</option><option value="url">网址</option></select></label>
+          <label>类型<select value={draft.targetType} onChange={(event) => {
+            const targetType = event.target.value as TargetType;
+            const targetChanged = targetType !== draft.targetType;
+            onChange({
+              ...draft,
+              targetType,
+              sourceShortcutPath: targetChanged ? undefined : draft.sourceShortcutPath,
+              shortcutPath: targetChanged ? undefined : draft.shortcutPath,
+            });
+          }}><option value="program">程序</option><option value="shortcut">快捷方式</option><option value="folder">系统文件夹</option><option value="url">网址</option></select></label>
           <label>启动参数<input value={draft.args} onChange={(event) => onChange({ ...draft, args: event.target.value })} placeholder="可选" /></label>
-          <label className="wide">路径{draft.targetType === "url" ? <input value={draft.path} onChange={(event) => onChange({ ...draft, path: event.target.value, targetType: "url" })} placeholder="https://example.com" /> : <div className="inline-input"><input value={draft.path} onChange={(event) => onChange({ ...draft, path: event.target.value, targetType: inferType(event.target.value) })} /><button onClick={() => onPickTarget(draft.targetType)} type="button"><Folder size={16} />选择</button></div>}</label>
+          <label className="wide">路径{draft.targetType === "url" ? <input value={draft.path} onChange={(event) => onChange({ ...draft, path: event.target.value, targetType: "url", sourceShortcutPath: undefined, shortcutPath: undefined })} placeholder="https://example.com" /> : <div className="inline-input"><input value={draft.path} onChange={(event) => {
+            const path = event.target.value;
+            onChange({ ...draft, path, targetType: inferType(path), sourceShortcutPath: isShortcutPath(path) ? path : undefined, shortcutPath: undefined });
+          }} /><button onClick={() => onPickTarget(draft.targetType)} type="button"><Folder size={16} />选择</button></div>}</label>
           <label className="wide">图标<div className="inline-input"><input value={draft.iconPath ?? ""} onChange={(event) => onChange({ ...draft, iconPath: event.target.value })} placeholder="自动提取，或手动选择图片/exe/lnk" /><button onClick={onPickIcon} type="button"><AppWindow size={16} />选择</button></div></label>
         </div>
         <footer className={onDelete ? "split-footer" : ""}>{onDelete ? <button className="danger" onClick={onDelete} type="button"><Trash2 size={16} />删除</button> : null}<div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>

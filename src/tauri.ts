@@ -115,9 +115,9 @@ export async function storeIcon(path: string, itemId: string): Promise<string> {
   return invoke<string>("store_icon", { path, itemId });
 }
 
-export async function launchTarget(path: string, args: string, targetType: TargetType): Promise<void> {
+export async function launchTarget(path: string, args: string, targetType: TargetType, shortcutPath?: string): Promise<void> {
   if (!isTauri) return;
-  await invoke("launch_target", { path, args, targetType });
+  await invoke("launch_target", { path, args, targetType, shortcutPath });
 }
 
 export async function openProgramInExplorer(path: string): Promise<void> {
@@ -203,6 +203,11 @@ export async function createWorkspaceShortcut(
     destinationPath,
     name,
   });
+}
+
+export async function backupShortcut(sourcePath: string, name: string): Promise<WorkspacePathResult> {
+  if (!isTauri) return { path: `browser-preview/.quick-launcher-shortcuts/${name}.lnk` };
+  return invoke<WorkspacePathResult>("backup_shortcut", { sourcePath, name });
 }
 
 export async function recycleWorkspacePath(path: string): Promise<boolean> {
