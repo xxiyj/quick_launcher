@@ -144,6 +144,12 @@ interface CardContextMenuState {
   y: number;
 }
 
+interface CreateMenuState {
+  x: number;
+  y: number;
+  launcherMode: "launcher" | "shortcut";
+}
+
 interface ScheduleDraft extends LaunchSchedule {
   itemId: string;
 }
@@ -212,7 +218,7 @@ function defaultData(): LauncherData {
       closeToTray: true,
       autoStart: false,
       autoHideAfterLaunch: true,
-      autoHideOnBlur: true,
+      autoHideOnBlur: false,
       autoSortByLaunchCount: true,
       showCardMeta: true,
       launchMode: "single",
@@ -351,15 +357,19 @@ export default function App() {
   const [folderDraft, setFolderDraft] = useState<FolderDraft | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
+  const [createMenu, setCreateMenu] = useState<CreateMenuState | null>(null);
   const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen || scheduleDraft);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const resizeSaveTimer = useRef<number | undefined>(undefined);
   const pendingBlurHide = useRef<number | undefined>(undefined);
   const ignoreAutoHideUntil = useRef(0);
+  const autoHideOnBlurRef = useRef(data.settings.autoHideOnBlur);
+  const modalOpenRef = useRef(modalOpen);
   const lastSavedWindowSize = useRef<{ width: number; height: number } | undefined>(undefined);
   const intervalScheduleState = useRef(new Map<string, { signature: string; lastRunAt: number }>());
   const dailyScheduleRuns = useRef(new Set<string>());
@@ -376,7 +386,6 @@ export default function App() {
     () => data.items.find((item) => item.id === currentFolderId && item.kind === "workspaceFolder"),
     [currentFolderId, data.items],
   );
-  const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen || scheduleDraft);
 
   useEffect(() => {
     loadData()
@@ -474,6 +483,24 @@ export default function App() {
   }, [cardContextMenu]);
 
   useEffect(() => {
+    if (!createMenu) return;
+    const closeMenu = () => setCreateMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [createMenu]);
+
+  useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
     let unlisten: (() => void) | undefined;
@@ -531,6 +558,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    autoHideOnBlurRef.current = data.settings.autoHideOnBlur;
+    if (!data.settings.autoHideOnBlur) {
+      window.clearTimeout(pendingBlurHide.current);
+      pendingBlurHide.current = undefined;
+    }
+  }, [data.settings.autoHideOnBlur]);
+
+  useEffect(() => {
+    modalOpenRef.current = modalOpen;
+    if (modalOpen) {
+      window.clearTimeout(pendingBlurHide.current);
+      pendingBlurHide.current = undefined;
+    }
+  }, [modalOpen]);
+
+  useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
     const appWindow = getCurrentWindow();
     let cleanup: (() => void) | undefined;
@@ -554,6 +597,7 @@ export default function App() {
     if (!("__TAURI_INTERNALS__" in window)) return;
     const appWindow = getCurrentWindow();
     let cleanup: (() => void) | undefined;
+    let disposed = false;
 
     function cancelPendingBlurHide() {
       window.clearTimeout(pendingBlurHide.current);
@@ -566,7 +610,7 @@ export default function App() {
           cancelPendingBlurHide();
           return;
         }
-        if (!data.settings.autoHideOnBlur || modalOpen) return;
+        if (!autoHideOnBlurRef.current || modalOpenRef.current) return;
         if (Date.now() < ignoreAutoHideUntil.current) return;
         cancelPendingBlurHide();
         pendingBlurHide.current = window.setTimeout(() => {
@@ -574,22 +618,32 @@ export default function App() {
           void appWindow
             .isFocused()
             .then((focused) => {
-              if (focused || Date.now() < ignoreAutoHideUntil.current) return;
+              if (
+                focused
+                || !autoHideOnBlurRef.current
+                || modalOpenRef.current
+                || Date.now() < ignoreAutoHideUntil.current
+              ) return;
               return hideMainWindow("blur");
             })
             .catch((error) => setStatus(`窗口焦点检查失败：${String(error)}`));
         }, BLUR_HIDE_DELAY_MS);
       })
       .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
         cleanup = unlisten;
       })
       .catch((error) => setStatus(`窗口焦点监听失败：${String(error)}`));
 
     return () => {
+      disposed = true;
       cancelPendingBlurHide();
       cleanup?.();
     };
-  }, [data.settings.autoHideOnBlur, modalOpen]);
+  }, []);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -1029,6 +1083,22 @@ export default function App() {
     setDraft({ ...emptyDraft, targetType: "shortcut", categoryId: selectedCategoryId(), parentId: currentFolder?.id ?? null });
   }
 
+  function openCreateMenu(x: number, y: number, launcherMode: CreateMenuState["launcherMode"]) {
+    const width = 210;
+    const height = 120;
+    setCardContextMenu(null);
+    setCreateMenu({
+      x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
+      launcherMode,
+    });
+  }
+
+  function openToolbarCreateMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    openCreateMenu(rect.right - 210, rect.bottom + 8, "launcher");
+  }
+
   async function pickTarget(targetType: TargetType) {
     const path = await chooseTarget(targetType);
     if (!path) return;
@@ -1440,6 +1510,11 @@ export default function App() {
     launchMode: LaunchMode,
   ) {
     try {
+      autoHideOnBlurRef.current = autoHideOnBlur;
+      if (!autoHideOnBlur) {
+        window.clearTimeout(pendingBlurHide.current);
+        pendingBlurHide.current = undefined;
+      }
       const nextHotkey = hotkey.trim() || DEFAULT_HOTKEY;
       await updateHotkey(nextHotkey);
       await updateStartup(autoStart);
@@ -1460,6 +1535,7 @@ export default function App() {
       setSettingsOpen(false);
       setStatus("设置已更新");
     } catch (error) {
+      autoHideOnBlurRef.current = data.settings.autoHideOnBlur;
       setStatus(`设置保存失败：${String(error)}`);
     }
   }
@@ -1514,15 +1590,22 @@ export default function App() {
                 <Search size={18} />
                 <input autoFocus ref={searchInputRef} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、备忘录或拼音首字母" value={query} />
               </label>
-              <button aria-label="新建备忘录" className="toolbar-action" onClick={openNewMemo} title="新建备忘录" type="button"><StickyNote size={17} /></button>
-              <button aria-label="新建文件夹" className="toolbar-action" onClick={openNewFolder} title="新建文件夹" type="button"><FolderPlus size={17} /></button>
-              <button className="primary icon-primary" onClick={() => openLaunchDraft()} title="添加启动项" type="button"><Plus size={18} /></button>
+              <button aria-expanded={createMenu?.launcherMode === "launcher"} aria-haspopup="menu" aria-label="新建内容" className="primary icon-primary" onClick={openToolbarCreateMenu} title="新建内容" type="button"><Plus size={18} /></button>
             </div>
           </header>
 
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleItemDragEnd}>
             <SortableContext items={visibleItems.map((item) => item.id)} strategy={rectSortingStrategy}>
-              <section className={`grid ${query.trim() || data.settings.autoSortByLaunchCount ? "sorting-disabled" : ""}`} aria-label="启动项列表">
+              <section
+                aria-label="启动项列表"
+                className={`grid ${query.trim() || data.settings.autoSortByLaunchCount ? "sorting-disabled" : ""}`}
+                onContextMenu={(event) => {
+                  const target = event.target;
+                  if (target instanceof Element && target.closest(".app-card, button, input, textarea, select")) return;
+                  event.preventDefault();
+                  openCreateMenu(event.clientX, event.clientY, "shortcut");
+                }}
+              >
                 {visibleItems.map((item) => (
                   <SortableAppCard
                   categoryName={item.categoryId === "all" ? "全部" : categories.find((category) => category.id === item.categoryId)?.name ?? "未分组"}
@@ -1634,6 +1717,18 @@ export default function App() {
           onSchedule={() => openSchedule(cardContextMenu.item)}
           x={cardContextMenu.x}
           y={cardContextMenu.y}
+        />
+      ) : null}
+
+      {createMenu ? (
+        <CreateMenu
+          launcherMode={createMenu.launcherMode}
+          onClose={() => setCreateMenu(null)}
+          onNewFolder={openNewFolder}
+          onNewLauncher={createMenu.launcherMode === "shortcut" ? openShortcutDraft : () => openLaunchDraft()}
+          onNewMemo={openNewMemo}
+          x={createMenu.x}
+          y={createMenu.y}
         />
       ) : null}
 
@@ -1986,6 +2081,33 @@ function CardContextMenu({ item, onClose, onDelete, onEdit, onOpenExplorer, onOp
       <span className="context-menu-divider" />
       <button onClick={() => invoke(onEdit)} role="menuitem" type="button"><Edit3 size={16} />编辑</button>
       <button className="context-menu-danger" onClick={() => invoke(onDelete)} role="menuitem" type="button"><Trash2 size={16} />删除</button>
+    </div>
+  );
+}
+
+interface CreateMenuProps {
+  launcherMode: CreateMenuState["launcherMode"];
+  onClose: () => void;
+  onNewFolder: () => void;
+  onNewLauncher: () => void;
+  onNewMemo: () => void;
+  x: number;
+  y: number;
+}
+
+function CreateMenu({ launcherMode, onClose, onNewFolder, onNewLauncher, onNewMemo, x, y }: CreateMenuProps) {
+  const launcherLabel = launcherMode === "shortcut" ? "添加快捷方式" : "添加启动项";
+
+  function invoke(action: () => void) {
+    onClose();
+    action();
+  }
+
+  return (
+    <div aria-label="新建菜单" className="create-menu" onContextMenu={(event) => event.preventDefault()} onPointerDown={(event) => event.stopPropagation()} role="menu" style={{ left: x, top: y }}>
+      <button onClick={() => invoke(onNewFolder)} role="menuitem" type="button"><FolderPlus size={16} />新建文件夹</button>
+      <button onClick={() => invoke(onNewMemo)} role="menuitem" type="button"><StickyNote size={16} />新建备忘录</button>
+      <button onClick={() => invoke(onNewLauncher)} role="menuitem" type="button">{launcherMode === "shortcut" ? <Link2 size={16} /> : <AppWindow size={16} />}{launcherLabel}</button>
     </div>
   );
 }

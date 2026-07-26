@@ -683,7 +683,8 @@ button {
   line-height: 1;
 }
 
-.card-context-menu {
+.card-context-menu,
+.create-menu {
   position: fixed;
   z-index: 50;
   display: grid;
@@ -695,7 +696,8 @@ button {
   box-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
 }
 
-.card-context-menu button {
+.card-context-menu button,
+.create-menu button {
   display: inline-flex;
   align-items: center;
   min-height: 36px;
@@ -708,7 +710,8 @@ button {
   text-align: left;
 }
 
-.card-context-menu button:hover {
+.card-context-menu button:hover,
+.create-menu button:hover {
   color: #182133;
   background: rgba(47, 128, 237, 0.09);
 }
@@ -1692,17 +1695,20 @@ button {
   background: rgba(47, 128, 237, 0.2);
 }
 
-.theme-dark .card-context-menu {
+.theme-dark .card-context-menu,
+.theme-dark .create-menu {
   border-color: rgba(205, 217, 235, 0.16);
   background: #253142;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
 }
 
-.theme-dark .card-context-menu button {
+.theme-dark .card-context-menu button,
+.theme-dark .create-menu button {
   color: #aab5c5;
 }
 
-.theme-dark .card-context-menu button:hover {
+.theme-dark .card-context-menu button:hover,
+.theme-dark .create-menu button:hover {
   color: #e0e6ee;
   background: rgba(104, 163, 240, 0.18);
 }

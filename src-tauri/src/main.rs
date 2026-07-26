@@ -141,7 +141,7 @@ struct LauncherSettings {
     auto_start: bool,
     #[serde(default = "default_true")]
     auto_hide_after_launch: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     auto_hide_on_blur: bool,
     #[serde(default = "default_true")]
     auto_sort_by_launch_count: bool,
@@ -376,7 +376,7 @@ fn default_data() -> LauncherData {
             close_to_tray: true,
             auto_start: false,
             auto_hide_after_launch: true,
-            auto_hide_on_blur: true,
+            auto_hide_on_blur: false,
             auto_sort_by_launch_count: true,
             show_card_meta: true,
             launch_mode: LaunchMode::Single,
@@ -2066,6 +2066,12 @@ fn show_main_window_unchecked(app: &AppHandle) {
 #[tauri::command]
 fn hide_main_window(app: AppHandle, reason: Option<String>) -> Result<(), String> {
     if reason.as_deref() == Some("blur") {
+        let blur_hiding_enabled = read_data(&state_path(&app))
+            .map(|data| data.settings.auto_hide_on_blur)
+            .unwrap_or(false);
+        if !blur_hiding_enabled {
+            return Ok(());
+        }
         let should_ignore = app
             .state::<Mutex<AppState>>()
             .lock()
@@ -2124,6 +2130,17 @@ mod tests {
             Some(start + BLUR_HIDE_SUPPRESSION),
             start + BLUR_HIDE_SUPPRESSION
         ));
+    }
+
+    #[test]
+    fn blur_hide_defaults_to_disabled() {
+        assert!(!default_data().settings.auto_hide_on_blur);
+
+        let settings: LauncherSettings = serde_json::from_value(serde_json::json!({
+            "closeToTray": true
+        }))
+        .unwrap();
+        assert!(!settings.auto_hide_on_blur);
     }
 
     #[test]

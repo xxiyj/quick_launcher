@@ -32,7 +32,7 @@ export async function loadData(): Promise<DataEnvelope> {
         closeToTray: true,
         autoStart: false,
         autoHideAfterLaunch: true,
-        autoHideOnBlur: true,
+        autoHideOnBlur: false,
         autoSortByLaunchCount: true,
         showCardMeta: true,
         launchMode: "single",
