@@ -259,6 +259,10 @@ struct AppState {
     data_path: PathBuf,
     last_shortcut_at: Option<Instant>,
     suppress_blur_hide_until: Option<Instant>,
+    /// Cached from settings so close-to-tray check never needs a disk read.
+    close_to_tray: bool,
+    /// Cached from settings so blur-hide check never needs a disk read.
+    auto_hide_on_blur: bool,
 }
 
 const SHORTCUT_DEBOUNCE: Duration = Duration::from_millis(350);
@@ -306,18 +310,30 @@ fn main() {
         )
         .setup(|app| {
             let data_path = data_path();
+            // Read settings once at startup to prime the cached flags in AppState
+            // so close-to-tray and blur-hide checks never need to touch the disk.
+            let initial_data = read_data(&data_path);
+            let (close_to_tray, auto_hide_on_blur) = initial_data
+                .as_ref()
+                .map(|d| (d.settings.close_to_tray, d.settings.auto_hide_on_blur))
+                .unwrap_or((true, false));
             app.manage(Mutex::new(AppState {
                 data_path,
                 last_shortcut_at: None,
                 suppress_blur_hide_until: None,
+                close_to_tray,
+                auto_hide_on_blur,
             }));
             setup_tray(app.handle())?;
 
-            if let Ok(data) = read_data(&state_path(app.handle())) {
-                apply_saved_window_size(app.handle(), &data);
-                let _ = register_hotkey(app.handle(), &data.settings.hotkey);
-            } else {
-                let _ = register_hotkey(app.handle(), DEFAULT_HOTKEY);
+            match initial_data {
+                Ok(data) => {
+                    apply_saved_window_size(app.handle(), &data);
+                    let _ = register_hotkey(app.handle(), &data.settings.hotkey);
+                }
+                Err(_) => {
+                    let _ = register_hotkey(app.handle(), DEFAULT_HOTKEY);
+                }
             }
             Ok(())
         })
@@ -915,8 +931,9 @@ fn apply_saved_window_size(app: &AppHandle, data: &LauncherData) {
 }
 
 fn should_close_to_tray(app: &AppHandle) -> bool {
-    read_data(&state_path(app))
-        .map(|data| data.settings.close_to_tray)
+    app.state::<Mutex<AppState>>()
+        .lock()
+        .map(|state| state.close_to_tray)
         .unwrap_or(true)
 }
 
@@ -1007,6 +1024,11 @@ fn save_data(app: AppHandle, mut data: LauncherData) -> Result<(), String> {
     normalize_data(&mut data);
     let path = state_path(&app);
     normalize_icon_paths(&mut data, &path);
+    // Keep the cached flags in sync so subsequent close/blur checks are free.
+    if let Ok(mut state) = app.state::<Mutex<AppState>>().lock() {
+        state.close_to_tray = data.settings.close_to_tray;
+        state.auto_hide_on_blur = data.settings.auto_hide_on_blur;
+    }
     write_data(&path, &data)
 }
 
@@ -2066,18 +2088,16 @@ fn show_main_window_unchecked(app: &AppHandle) {
 #[tauri::command]
 fn hide_main_window(app: AppHandle, reason: Option<String>) -> Result<(), String> {
     if reason.as_deref() == Some("blur") {
-        let blur_hiding_enabled = read_data(&state_path(&app))
-            .map(|data| data.settings.auto_hide_on_blur)
-            .unwrap_or(false);
-        if !blur_hiding_enabled {
-            return Ok(());
-        }
-        let should_ignore = app
+        // Both flags are cached in AppState; no disk read needed.
+        let should_hide = app
             .state::<Mutex<AppState>>()
             .lock()
-            .map(|state| should_ignore_blur_hide(state.suppress_blur_hide_until, Instant::now()))
+            .map(|state| {
+                state.auto_hide_on_blur
+                    && !should_ignore_blur_hide(state.suppress_blur_hide_until, Instant::now())
+            })
             .unwrap_or(false);
-        if should_ignore {
+        if !should_hide {
             return Ok(());
         }
     }

@@ -46,13 +46,16 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import packageJson from "../package.json";
+import { useScheduler } from "./hooks/useScheduler";
+import { useWindowBehavior } from "./hooks/useWindowBehavior";
 import { buildSearchKey, matchesSearch } from "./search";
+import { DEFAULT_DAILY_TIME, WEEKDAYS, isLauncher, isValidScheduleTime, localScheduleDay, localScheduleTime, localScheduleWeekday, normalizeLaunchSchedule } from "./utils";
 import {
   assetUrl,
   backupShortcut,
@@ -85,22 +88,9 @@ import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, Launc
 
 const COLORS = ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0", "#00a3a3"];
 const APP_VERSION = packageJson.version.replace(/\.0$/, "");
-const BLUR_HIDE_DELAY_MS = 150;
-const TITLEBAR_BLUR_SUPPRESSION_MS = 1500;
-const WINDOW_MOVE_BLUR_SUPPRESSION_MS = 500;
 const UPDATE_CHECK_FEEDBACK_MS = 350;
 const DEFAULT_HOTKEY = "Alt+R";
-const DEFAULT_DAILY_TIME = "08:00";
 const INTERVAL_PRESETS = [5, 15, 30, 60];
-const WEEKDAYS = [
-  { value: 1, label: "周一" },
-  { value: 2, label: "周二" },
-  { value: 3, label: "周三" },
-  { value: 4, label: "周四" },
-  { value: 5, label: "周五" },
-  { value: 6, label: "周六" },
-  { value: 7, label: "周日" },
-];
 
 const emptyDraft: ItemDraft = {
   name: "",
@@ -161,39 +151,6 @@ function newId(prefix: string) {
 function localMemoTitle(now = new Date()) {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-}
-
-function isValidScheduleTime(value: string) {
-  const match = /^(\d{2}):(\d{2})$/.exec(value);
-  if (!match) return false;
-  return Number(match[1]) < 24 && Number(match[2]) < 60;
-}
-
-function normalizeLaunchSchedule(schedule?: LaunchSchedule): LaunchSchedule {
-  const intervalMinutes = Math.min(10_080, Math.max(1, Math.floor(Number(schedule?.intervalMinutes) || 30)));
-  const weekdays = [...new Set((schedule?.weekdays ?? WEEKDAYS.map((day) => day.value)).filter((day) => Number.isInteger(day) && day >= 1 && day <= 7))].sort((a, b) => a - b);
-  const dailyTimes = [...new Set((schedule?.dailyTimes ?? []).filter(isValidScheduleTime))].sort();
-  return {
-    enabled: schedule?.enabled ?? true,
-    mode: schedule?.mode === "daily" ? "daily" : "interval",
-    intervalMinutes,
-    weekdays: weekdays.length ? weekdays : WEEKDAYS.map((day) => day.value),
-    dailyTimes: dailyTimes.length ? dailyTimes : [DEFAULT_DAILY_TIME],
-  };
-}
-
-function localScheduleDay(now: Date) {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
-
-function localScheduleTime(now: Date) {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-}
-
-function localScheduleWeekday(now: Date) {
-  return now.getDay() || 7;
 }
 
 function nextAvailableScheduleTime(times: string[]) {
@@ -291,10 +248,6 @@ function targetLabel(targetType?: TargetType) {
   return "程序";
 }
 
-function isLauncher(item: LauncherItem): item is LauncherItem & { kind: "launcher"; targetType: TargetType; args: string } {
-  return item.kind === "launcher" && Boolean(item.targetType);
-}
-
 function isWorkspaceFolder(item: LauncherItem | undefined): item is LauncherItem & { kind: "workspaceFolder" } {
   return item?.kind === "workspaceFolder";
 }
@@ -365,14 +318,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen || scheduleDraft);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const resizeSaveTimer = useRef<number | undefined>(undefined);
-  const pendingBlurHide = useRef<number | undefined>(undefined);
-  const ignoreAutoHideUntil = useRef(0);
-  const autoHideOnBlurRef = useRef(data.settings.autoHideOnBlur);
-  const modalOpenRef = useRef(modalOpen);
   const lastSavedWindowSize = useRef<{ width: number; height: number } | undefined>(undefined);
-  const intervalScheduleState = useRef(new Map<string, { signature: string; lastRunAt: number }>());
-  const dailyScheduleRuns = useRef(new Set<string>());
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -414,55 +360,6 @@ export default function App() {
     }, 250);
     return () => window.clearTimeout(id);
   }, [data, loaded]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    const checkSchedules = () => {
-      const now = new Date();
-      const nowMs = now.getTime();
-      const time = localScheduleTime(now);
-      const day = localScheduleDay(now);
-      const weekday = localScheduleWeekday(now);
-      const activeIntervalIds = new Set<string>();
-
-      for (const item of data.items) {
-        if (!isLauncher(item) || item.targetType === "url" || !item.schedule?.enabled) continue;
-        const schedule = normalizeLaunchSchedule(item.schedule);
-        if (schedule.mode === "interval") {
-          activeIntervalIds.add(item.id);
-          const signature = `${schedule.intervalMinutes}`;
-          const state = intervalScheduleState.current.get(item.id);
-          if (!state || state.signature !== signature) {
-            intervalScheduleState.current.set(item.id, { signature, lastRunAt: nowMs });
-            continue;
-          }
-          if (nowMs - state.lastRunAt >= schedule.intervalMinutes * 60_000) {
-            state.lastRunAt = nowMs;
-            void runItem(item, "scheduled");
-          }
-          continue;
-        }
-
-        if (!schedule.weekdays.includes(weekday) || !schedule.dailyTimes.includes(time)) continue;
-        const runKey = `${item.id}:${day}:${time}`;
-        if (dailyScheduleRuns.current.has(runKey)) continue;
-        dailyScheduleRuns.current.add(runKey);
-        void runItem(item, "scheduled");
-      }
-
-      for (const id of intervalScheduleState.current.keys()) {
-        if (!activeIntervalIds.has(id)) intervalScheduleState.current.delete(id);
-      }
-      if (dailyScheduleRuns.current.size > 512) {
-        const todayPrefix = `:${day}:`;
-        dailyScheduleRuns.current = new Set([...dailyScheduleRuns.current].filter((key) => key.includes(todayPrefix)));
-      }
-    };
-
-    checkSchedules();
-    const timer = window.setInterval(checkSchedules, 15_000);
-    return () => window.clearInterval(timer);
-  }, [data.items, loaded]);
 
   useEffect(() => {
     if (!cardContextMenu) return;
@@ -524,126 +421,6 @@ export default function App() {
 
     return () => unlisten?.();
   }, [categories, currentFolder, data.items, data.settings.defaultMemoCategoryId, selectedCategory]);
-
-  useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    const appWindow = getCurrentWindow();
-    let cleanup: (() => void) | undefined;
-
-    appWindow
-      .onResized(async (event) => {
-        if (await appWindow.isMaximized() || await appWindow.isMinimized()) return;
-        window.clearTimeout(resizeSaveTimer.current);
-        resizeSaveTimer.current = window.setTimeout(() => {
-          const windowSize = { width: event.payload.width, height: event.payload.height };
-          const saved = lastSavedWindowSize.current;
-          if (saved?.width === windowSize.width && saved.height === windowSize.height) return;
-          lastSavedWindowSize.current = windowSize;
-          setData((current) => ({
-            ...current,
-            settings: { ...current.settings, windowSize },
-          }));
-          void saveWindowSize(windowSize.width, windowSize.height);
-        }, 500);
-      })
-      .then((unlisten) => {
-        cleanup = unlisten;
-      })
-      .catch((error) => setStatus(`窗口尺寸监听失败：${String(error)}`));
-
-    return () => {
-      window.clearTimeout(resizeSaveTimer.current);
-      cleanup?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    autoHideOnBlurRef.current = data.settings.autoHideOnBlur;
-    if (!data.settings.autoHideOnBlur) {
-      window.clearTimeout(pendingBlurHide.current);
-      pendingBlurHide.current = undefined;
-    }
-  }, [data.settings.autoHideOnBlur]);
-
-  useEffect(() => {
-    modalOpenRef.current = modalOpen;
-    if (modalOpen) {
-      window.clearTimeout(pendingBlurHide.current);
-      pendingBlurHide.current = undefined;
-    }
-  }, [modalOpen]);
-
-  useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    const appWindow = getCurrentWindow();
-    let cleanup: (() => void) | undefined;
-
-    appWindow
-      .onMoved(() => {
-        // A native titlebar drag can briefly report a blur before the move completes.
-        ignoreAutoHideUntil.current = Date.now() + WINDOW_MOVE_BLUR_SUPPRESSION_MS;
-        window.clearTimeout(pendingBlurHide.current);
-        pendingBlurHide.current = undefined;
-      })
-      .then((unlisten) => {
-        cleanup = unlisten;
-      })
-      .catch((error) => setStatus(`窗口移动监听失败：${String(error)}`));
-
-    return () => cleanup?.();
-  }, []);
-
-  useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    const appWindow = getCurrentWindow();
-    let cleanup: (() => void) | undefined;
-    let disposed = false;
-
-    function cancelPendingBlurHide() {
-      window.clearTimeout(pendingBlurHide.current);
-      pendingBlurHide.current = undefined;
-    }
-
-    appWindow
-      .onFocusChanged((event) => {
-        if (event.payload) {
-          cancelPendingBlurHide();
-          return;
-        }
-        if (!autoHideOnBlurRef.current || modalOpenRef.current) return;
-        if (Date.now() < ignoreAutoHideUntil.current) return;
-        cancelPendingBlurHide();
-        pendingBlurHide.current = window.setTimeout(() => {
-          pendingBlurHide.current = undefined;
-          void appWindow
-            .isFocused()
-            .then((focused) => {
-              if (
-                focused
-                || !autoHideOnBlurRef.current
-                || modalOpenRef.current
-                || Date.now() < ignoreAutoHideUntil.current
-              ) return;
-              return hideMainWindow("blur");
-            })
-            .catch((error) => setStatus(`窗口焦点检查失败：${String(error)}`));
-        }, BLUR_HIDE_DELAY_MS);
-      })
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten();
-          return;
-        }
-        cleanup = unlisten;
-      })
-      .catch((error) => setStatus(`窗口焦点监听失败：${String(error)}`));
-
-    return () => {
-      disposed = true;
-      cancelPendingBlurHide();
-      cleanup?.();
-    };
-  }, []);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -719,9 +496,9 @@ export default function App() {
     return categories[0]?.id ?? "default";
   }
 
-  function persist(updater: (value: LauncherData) => LauncherData) {
+  const persist = useCallback((updater: (value: LauncherData) => LauncherData) => {
     setData((current) => updater(current));
-  }
+  }, []);
 
   function toggleTheme() {
     const theme = data.settings.theme === "light" ? "dark" : "light";
@@ -739,11 +516,11 @@ export default function App() {
     requestAnimationFrame(() => searchInputRef.current?.focus());
   }
 
-  function enterFolder(folder: LauncherItem) {
+  const enterFolder = useCallback((folder: LauncherItem) => {
     setQuery("");
     setCurrentFolderId(folder.id);
     setSelectedCategory(folder.categoryId);
-  }
+  }, []);
 
   function reorderVisibleItems(activeId: string, overId: string) {
     const oldIndex = visibleItems.findIndex((item) => item.id === activeId);
@@ -998,7 +775,9 @@ export default function App() {
     }
     persist((current) => ({ ...current, items: [...current.items, ...additions] }));
     setStatus(`已添加 ${additions.length} 个拖入目标，正在后台解析`);
-    additions.forEach((item) => void hydrateItemFromPath(item.path, item.id));
+    // Use Promise.allSettled so icon hydration for all dropped files runs
+    // concurrently without any single failure aborting the others.
+    void Promise.allSettled(additions.map((item) => hydrateItemFromPath(item.path, item.id)));
   }
 
   function addCategory(name: string) {
@@ -1259,7 +1038,7 @@ export default function App() {
     });
   }
 
-  async function openMemo(item: LauncherItem) {
+  const openMemo = useCallback(async (item: LauncherItem) => {
     try {
       setStatus("正在读取备忘录...");
       const content = await readMemo(item.path);
@@ -1277,7 +1056,7 @@ export default function App() {
     } catch (error) {
       setStatus(`读取备忘录失败：${String(error)}`);
     }
-  }
+  }, []);
 
   async function submitMemoDraft() {
     if (!memoDraft) return;
@@ -1328,7 +1107,7 @@ export default function App() {
     });
   }
 
-  function openFolderEditor(item: LauncherItem) {
+  const openFolderEditor = useCallback((item: LauncherItem) => {
     setFolderDraft({
       id: item.id,
       name: item.name,
@@ -1338,7 +1117,7 @@ export default function App() {
       lockCategory: true,
       createdAt: item.createdAt,
     });
-  }
+  }, []);
 
   async function submitFolderDraft() {
     if (!folderDraft?.name.trim()) {
@@ -1433,7 +1212,7 @@ export default function App() {
     if (item) await removeNode(item);
   }
 
-  async function runItem(item: LauncherItem, source: "manual" | "scheduled" = "manual") {
+  const runItem = useCallback(async (item: LauncherItem, source: "manual" | "scheduled" = "manual") => {
     if (!isLauncher(item)) return;
     try {
       await launchTarget(item.path, item.args, item.targetType, item.shortcutPath);
@@ -1453,9 +1232,19 @@ export default function App() {
     } catch (error) {
       setStatus(`启动失败：${String(error)}`);
     }
-  }
+  }, [persist, data.settings.autoHideAfterLaunch]);
 
-  function openCardContextMenu(item: LauncherItem, x: number, y: number) {
+  // Custom hooks for scheduler and window behavior
+  useScheduler({ items: data.items, loaded, onRunItem: runItem });
+  const { suppressAutoHide } = useWindowBehavior({
+    autoHideOnBlur: data.settings.autoHideOnBlur,
+    modalOpen,
+    lastSavedWindowSize,
+    setData,
+    setStatus
+  });
+
+  const openCardContextMenu = useCallback((item: LauncherItem, x: number, y: number) => {
     const width = 218;
     const height = isLauncher(item) ? (item.targetType === "url" ? 150 : 270) : 100;
     setCardContextMenu({
@@ -1463,7 +1252,7 @@ export default function App() {
       x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
       y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
     });
-  }
+  }, []);
 
   async function openProgramDirectory(item: LauncherItem, destination: "explorer" | "terminal") {
     try {
@@ -1480,11 +1269,21 @@ export default function App() {
     setScheduleDraft({ itemId: item.id, ...normalizeLaunchSchedule(item.schedule) });
   }
 
-  function editNode(item: LauncherItem) {
+  const editNode = useCallback((item: LauncherItem) => {
     if (item.kind === "workspaceFolder") openFolderEditor(item);
     else if (item.kind === "memo") void openMemo(item);
-    else openLaunchDraft(item);
-  }
+    else if (isLauncher(item)) setDraft({
+      id: item.id,
+      name: item.name,
+      path: item.path,
+      args: item.args,
+      targetType: item.targetType,
+      categoryId: item.categoryId,
+      parentId: item.parentId ?? null,
+      iconPath: item.iconPath,
+      shortcutPath: item.shortcutPath,
+    });
+  }, [openFolderEditor, openMemo]);
 
   function saveSchedule() {
     if (!scheduleDraft) return;
@@ -1510,11 +1309,6 @@ export default function App() {
     launchMode: LaunchMode,
   ) {
     try {
-      autoHideOnBlurRef.current = autoHideOnBlur;
-      if (!autoHideOnBlur) {
-        window.clearTimeout(pendingBlurHide.current);
-        pendingBlurHide.current = undefined;
-      }
       const nextHotkey = hotkey.trim() || DEFAULT_HOTKEY;
       await updateHotkey(nextHotkey);
       await updateStartup(autoStart);
@@ -1535,7 +1329,6 @@ export default function App() {
       setSettingsOpen(false);
       setStatus("设置已更新");
     } catch (error) {
-      autoHideOnBlurRef.current = data.settings.autoHideOnBlur;
       setStatus(`设置保存失败：${String(error)}`);
     }
   }
@@ -1545,11 +1338,7 @@ export default function App() {
       <WindowTitlebar
         theme={data.settings.theme}
         onToggleTheme={toggleTheme}
-        onTitlebarInteraction={() => {
-          ignoreAutoHideUntil.current = Date.now() + TITLEBAR_BLUR_SUPPRESSION_MS;
-          window.clearTimeout(pendingBlurHide.current);
-          pendingBlurHide.current = undefined;
-        }}
+        onTitlebarInteraction={suppressAutoHide}
       />
 
       <div className="main-layout">
@@ -1614,11 +1403,11 @@ export default function App() {
                     key={item.id}
                     launchMode={data.settings.launchMode}
                     showCardMeta={data.settings.showCardMeta}
-                    onEdit={() => editNode(item)}
-                    onOpenFolder={() => enterFolder(item)}
-                    onOpenMemo={() => void openMemo(item)}
+                    onEdit={editNode}
+                    onOpenFolder={enterFolder}
+                    onOpenMemo={openMemo}
                     onOpenContextMenu={openCardContextMenu}
-                    onRun={() => void runItem(item)}
+                    onRun={runItem}
                   />
                 ))}
                 {!visibleItems.length ? (
@@ -1985,14 +1774,14 @@ interface SortableAppCardProps {
   item: LauncherItem;
   launchMode: LaunchMode;
   showCardMeta: boolean;
-  onEdit: () => void;
-  onOpenFolder: () => void;
-  onOpenMemo: () => void;
+  onEdit: (item: LauncherItem) => void;
+  onOpenFolder: (item: LauncherItem) => void;
+  onOpenMemo: (item: LauncherItem) => void;
   onOpenContextMenu: (item: LauncherItem, x: number, y: number) => void;
-  onRun: () => void;
+  onRun: (item: LauncherItem) => void;
 }
 
-function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onOpenContextMenu, onRun, showCardMeta }: SortableAppCardProps) {
+const SortableAppCard = memo(function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit, onOpenFolder, onOpenMemo, onOpenContextMenu, onRun, showCardMeta }: SortableAppCardProps) {
   const folder = item.kind === "workspaceFolder";
   const sortable = useSortable({ id: item.id, disabled: folder });
   const droppable = useDroppable({ id: `folder-drop-${item.id}`, disabled: !folder });
@@ -2013,15 +1802,15 @@ function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit,
             : <AppWindow size={34} />;
 
   function activate() {
-    if (folder) onOpenFolder();
-    else if (item.kind === "memo") onOpenMemo();
-    else if (launchMode === "single") onRun();
+    if (folder) onOpenFolder(item);
+    else if (item.kind === "memo") onOpenMemo(item);
+    else if (launchMode === "single") onRun(item);
   }
 
   return (
     <article
       className={`app-card ${folder ? "workspace-folder-card" : ""} ${hasSchedule ? "has-schedule" : ""} ${isDragging ? "drag-sorting" : ""} ${isOverFolder ? "folder-drop-target" : ""}`}
-      onDoubleClick={isLauncher(item) && launchMode === "double" ? onRun : undefined}
+      onDoubleClick={isLauncher(item) && launchMode === "double" ? () => onRun(item) : undefined}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -2038,13 +1827,13 @@ function SortableAppCard({ categoryName, iconBasePath, item, launchMode, onEdit,
         {showCardMeta ? <span className="app-meta">{itemLabel(item)}<i />{categoryName}</span> : null}
       </button>
       <div className="card-tools">
-        <button onPointerDown={(event) => event.stopPropagation()} onClick={onEdit} title={folder ? "重命名" : item.kind === "memo" ? "编辑备忘录" : "编辑"} type="button"><Edit3 size={16} /></button>
+        <button onPointerDown={(event) => event.stopPropagation()} onClick={() => onEdit(item)} title={folder ? "重命名" : item.kind === "memo" ? "编辑备忘录" : "编辑"} type="button"><Edit3 size={16} /></button>
       </div>
       {hasSchedule ? <span aria-label="已设置定时启动" className="schedule-badge" title="已设置定时启动"><Clock3 size={12} />定时</span> : null}
       {isOverFolder ? <span className="folder-drop-hint">放入文件夹</span> : null}
     </article>
   );
-}
+});
 
 interface CardContextMenuProps {
   item: LauncherItem;
