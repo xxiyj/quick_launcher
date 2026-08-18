@@ -541,8 +541,8 @@ fn is_valid_schedule_time(value: &str) -> bool {
     {
         return false;
     }
-    let hours = u8::from_str_radix(&value[..2], 10).unwrap_or(u8::MAX);
-    let minutes = u8::from_str_radix(&value[3..], 10).unwrap_or(u8::MAX);
+    let hours = value[..2].parse::<u8>().unwrap_or(u8::MAX);
+    let minutes = value[3..].parse::<u8>().unwrap_or(u8::MAX);
     hours < 24 && minutes < 60
 }
 
@@ -609,7 +609,7 @@ fn clean_workspace_name(value: &str) -> Result<String, String> {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .trim_end_matches(|character: char| character == '.' || character == ' ')
+        .trim_end_matches(['.', ' '])
         .to_string();
 
     if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
@@ -919,7 +919,7 @@ fn create_workspace_shortcut(
 }
 
 fn write_internet_shortcut(url: &str, output: &Path) -> Result<(), String> {
-    let url = url.replace('\r', "").replace('\n', "");
+    let url = url.replace(['\r', '\n'], "");
     if !is_url_path(&url) {
         return Err("网址必须以 http:// 或 https:// 开头".into());
     }

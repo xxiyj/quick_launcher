@@ -1,6 +1,6 @@
 [package]
 name = "quick-launcher"
-version = "1.24.0"
+version = "1.24.1"
 description = "A tidy Windows desktop launcher."
 authors = ["Codex"]
 edition = "2021"

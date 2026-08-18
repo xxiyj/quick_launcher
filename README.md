@@ -96,7 +96,7 @@ cargo --version
 npm.cmd run tauri:build
 ```
 
-当前版本：`1.24.0`
+当前版本：`1.24.1`
 
 构建产物位于：
 
