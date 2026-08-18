@@ -974,8 +974,20 @@ fn recycle_workspace_path(app: AppHandle, path: String) -> Result<bool, String> 
     if paths_equal(&path, &root) || !path.starts_with(&root) {
         return Ok(false);
     }
-    recycle_path_native(&path)?;
+    recycle_path_native(&shell_compatible_path(&path))?;
     Ok(true)
+}
+
+fn shell_compatible_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("\\\\?\\unc\\") {
+        return PathBuf::from(format!("\\\\{}", &text[8..]));
+    }
+    if lower.starts_with("\\\\?\\") {
+        return PathBuf::from(&text[4..]);
+    }
+    path.to_path_buf()
 }
 
 fn apply_saved_window_size(app: &AppHandle, data: &LauncherData) {
@@ -2569,6 +2581,22 @@ mod tests {
             infer_target_type("https://openai.com"),
             TargetType::Url
         ));
+    }
+
+    #[test]
+    fn shell_paths_drop_extended_length_prefixes() {
+        assert_eq!(
+            shell_compatible_path(Path::new(r"\\?\C:\workspace\item.url")),
+            PathBuf::from(r"C:\workspace\item.url")
+        );
+        assert_eq!(
+            shell_compatible_path(Path::new(r"\\?\UNC\server\share\item.url")),
+            PathBuf::from(r"\\server\share\item.url")
+        );
+        assert_eq!(
+            shell_compatible_path(Path::new(r"C:\workspace\item.url")),
+            PathBuf::from(r"C:\workspace\item.url")
+        );
     }
 
     #[test]
