@@ -90,9 +90,9 @@ export async function resolveTarget(path: string): Promise<ResolvedTarget> {
     return {
       path,
       args: "",
-      targetType: /^https?:\/\//.test(normalized) || normalized.endsWith(".url")
+      targetType: /^https?:\/\//.test(normalized)
         ? "url"
-        : normalized.endsWith(".lnk")
+        : normalized.endsWith(".lnk") || normalized.endsWith(".link") || normalized.endsWith(".url")
           ? "shortcut"
           : "program",
     };
@@ -206,7 +206,10 @@ export async function createWorkspaceShortcut(
 }
 
 export async function backupShortcut(sourcePath: string, name: string): Promise<WorkspacePathResult> {
-  if (!isTauri) return { path: `browser-preview/.quick-launcher-shortcuts/${name}.lnk` };
+  if (!isTauri) {
+    const extension = sourcePath.trim().toLowerCase().endsWith(".url") ? "url" : "lnk";
+    return { path: `browser-preview/.quick-launcher-shortcuts/${name}.${extension}` };
+  }
   return invoke<WorkspacePathResult>("backup_shortcut", { sourcePath, name });
 }
 

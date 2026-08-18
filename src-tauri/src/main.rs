@@ -502,6 +502,9 @@ fn normalize_data(data: &mut LauncherData) {
         {
             item.category_id = fallback_category.clone();
         }
+        if matches!(&item.kind, ItemKind::Launcher) && is_internet_shortcut_path(&item.path) {
+            item.target_type = Some(TargetType::Shortcut);
+        }
         if let Some(schedule) = item.schedule.as_mut() {
             normalize_launch_schedule(schedule);
         }
@@ -805,6 +808,22 @@ fn copy_shortcut_to_directory(
     Ok(output)
 }
 
+fn copy_internet_shortcut_to_directory(
+    source: &Path,
+    destination: &Path,
+    name: &str,
+) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err("网址快捷方式文件不存在".into());
+    }
+    if !destination.is_dir() {
+        return Err("快捷方式目标目录不可用".into());
+    }
+    let output = unique_workspace_path(destination, name, Some("url"), None)?;
+    fs::copy(source, &output).map_err(|error| error.to_string())?;
+    Ok(output)
+}
+
 fn internal_shortcuts_directory(app: &AppHandle) -> Result<PathBuf, String> {
     let root = canonical_workspace_root(app)?;
     let directory = root.join(INTERNAL_SHORTCUTS_DIR);
@@ -823,7 +842,7 @@ fn backup_shortcut(
     name: String,
 ) -> Result<WorkspacePathResult, String> {
     let source_path = sanitize_path(&source_path);
-    if !is_shortcut_path(&source_path) {
+    if !is_shortcut_path(&source_path) && !is_internet_shortcut_path(&source_path) {
         return Err("只能备份 Windows 快捷方式文件".into());
     }
     let source =
@@ -838,7 +857,11 @@ fn backup_shortcut(
     }
 
     let destination = internal_shortcuts_directory(&app)?;
-    copy_shortcut_to_directory(&source, &destination, &name).map(workspace_path_result)
+    if is_internet_shortcut_path(&source_path) {
+        copy_internet_shortcut_to_directory(&source, &destination, &name).map(workspace_path_result)
+    } else {
+        copy_shortcut_to_directory(&source, &destination, &name).map(workspace_path_result)
+    }
 }
 
 #[tauri::command]
@@ -872,6 +895,11 @@ fn create_workspace_shortcut(
                     .map(workspace_path_result);
             }
         }
+
+        let source = fs::canonicalize(&source_path)
+            .map_err(|error| format!("网址快捷方式文件不可用：{error}"))?;
+        return copy_internet_shortcut_to_directory(&source, &destination, &name)
+            .map(workspace_path_result);
     }
 
     if is_url_path(&source_path) {
@@ -897,6 +925,38 @@ fn write_internet_shortcut(url: &str, output: &Path) -> Result<(), String> {
     }
     fs::write(output, format!("[InternetShortcut]\r\nURL={url}\r\n"))
         .map_err(|error| error.to_string())
+}
+
+fn read_internet_shortcut_url(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let text = if bytes.starts_with(&[0xff, 0xfe]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("url") {
+            let url = value.trim().trim_matches('\0');
+            if is_valid_internet_shortcut_url(url) {
+                return Ok(url.to_string());
+            }
+        }
+    }
+    Err("网址快捷方式中没有有效的 URL".into())
 }
 
 #[tauri::command]
@@ -1258,10 +1318,10 @@ fn choose_target(target_type: TargetType) -> Result<Option<String>, String> {
         TargetType::Folder => rfd::FileDialog::new().pick_folder(),
         TargetType::Program => rfd::FileDialog::new()
             .add_filter("程序", &["exe"])
-            .add_filter("快捷方式", &["lnk", "link"])
+            .add_filter("快捷方式", &["lnk", "link", "url"])
             .pick_file(),
         TargetType::Shortcut => rfd::FileDialog::new()
-            .add_filter("快捷方式", &["lnk", "link"])
+            .add_filter("快捷方式", &["lnk", "link", "url"])
             .pick_file(),
         TargetType::Url => None,
     };
@@ -1274,12 +1334,38 @@ fn is_shortcut_path(path: &str) -> bool {
 }
 
 fn is_internet_shortcut_path(path: &str) -> bool {
-    path.trim().to_ascii_lowercase().ends_with(".url")
+    !is_url_path(path) && path.trim().to_ascii_lowercase().ends_with(".url")
 }
 
 fn is_url_path(path: &str) -> bool {
     let path = path.trim().to_ascii_lowercase();
     path.starts_with("https://") || path.starts_with("http://")
+}
+
+fn is_valid_internet_shortcut_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty()
+        || url
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return false;
+    }
+
+    let bytes = url.as_bytes();
+    if !bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+
+    for byte in &bytes[1..] {
+        if *byte == b':' {
+            return true;
+        }
+        if !byte.is_ascii_alphanumeric() && !matches!(*byte, b'+' | b'-' | b'.') {
+            return false;
+        }
+    }
+    false
 }
 
 fn sanitize_path(path: &str) -> String {
@@ -1292,11 +1378,11 @@ fn sanitize_path(path: &str) -> String {
 }
 
 fn infer_target_type(path: &str) -> TargetType {
-    if is_url_path(path) || is_internet_shortcut_path(path) {
+    if is_url_path(path) {
         TargetType::Url
     } else if Path::new(path).is_dir() {
         TargetType::Folder
-    } else if is_shortcut_path(path) {
+    } else if is_shortcut_path(path) || is_internet_shortcut_path(path) {
         TargetType::Shortcut
     } else {
         TargetType::Program
@@ -1306,9 +1392,16 @@ fn infer_target_type(path: &str) -> TargetType {
 #[tauri::command]
 fn resolve_target(path: String) -> Result<ResolvedTarget, String> {
     let path = sanitize_path(&path);
-    if is_url_path(&path) || is_internet_shortcut_path(&path) {
+    if is_url_path(&path) {
         return Ok(ResolvedTarget {
             target_type: TargetType::Url,
+            path,
+            args: String::new(),
+        });
+    }
+    if is_internet_shortcut_path(&path) {
+        return Ok(ResolvedTarget {
+            target_type: TargetType::Shortcut,
             path,
             args: String::new(),
         });
@@ -1788,7 +1881,7 @@ fn directory_from_path(path: &Path) -> Result<PathBuf, String> {
 
 fn location_target_path(path: &str) -> Result<PathBuf, String> {
     let path = sanitize_path(path);
-    if path.trim().is_empty() || is_url_path(&path) || is_internet_shortcut_path(&path) {
+    if path.trim().is_empty() || is_url_path(&path) {
         return Err("网址没有可打开的本地目录".into());
     }
     let target = if is_shortcut_path(&path) {
@@ -1864,7 +1957,13 @@ fn shell_execute_target_native(
     args: &str,
     target_type: &TargetType,
 ) -> Result<(), isize> {
-    let file = wide_path(&path);
+    let launch_path =
+        if matches!(target_type, TargetType::Shortcut) && is_internet_shortcut_path(path) {
+            read_internet_shortcut_url(Path::new(path)).unwrap_or_else(|_| path.to_string())
+        } else {
+            path.to_string()
+        };
+    let file = wide_path(&launch_path);
     let params = if matches!(target_type, TargetType::Program) && !args.trim().is_empty() {
         Some(wide_path(args.trim()))
     } else {
@@ -1920,11 +2019,6 @@ fn launch_target_native(
     target_type: TargetType,
     shortcut_path: Option<String>,
 ) -> Result<(), String> {
-    let primary_error = match shell_execute_target_native(&path, &args, &target_type) {
-        Ok(()) => return Ok(()),
-        Err(code) => code,
-    };
-
     let fallback = shortcut_path
         .filter(|shortcut_path| !shortcut_path.trim().is_empty())
         .filter(|shortcut_path| !paths_equal(Path::new(shortcut_path), Path::new(&path)));
@@ -1932,15 +2026,32 @@ fn launch_target_native(
         match shell_execute_target_native(&fallback, "", &TargetType::Shortcut) {
             Ok(()) => return Ok(()),
             Err(fallback_error) => {
+                let primary_error = match shell_execute_target_native(&path, &args, &target_type) {
+                    Ok(()) => return Ok(()),
+                    Err(code) => code,
+                };
                 return Err(format!(
-                    "{}；应用内快捷方式备份也无法启动（ShellExecute 错误代码 {fallback_error}）",
+                    "应用内快捷方式备份无法启动：{fallback}（ShellExecute 错误代码 {fallback_error}）；{}",
                     shell_execute_failure_message(&path, primary_error)
                 ));
             }
         }
     }
 
-    Err(shell_execute_failure_message(&path, primary_error))
+    let primary_error = match shell_execute_target_native(&path, &args, &target_type) {
+        Ok(()) => return Ok(()),
+        Err(code) => code,
+    };
+    let message = shell_execute_failure_message(&path, primary_error);
+    if primary_error == 2
+        && matches!(target_type, TargetType::Shortcut)
+        && is_internet_shortcut_path(&path)
+    {
+        return Err(format!(
+            "{message}；原始网址快捷方式已不存在，请重新拖入或选择该 .url 文件"
+        ));
+    }
+    Err(message)
 }
 
 #[cfg(not(windows))]
@@ -2445,6 +2556,102 @@ mod tests {
     }
 
     #[test]
+    fn internet_shortcuts_are_classified_as_shortcuts() {
+        let path = r"C:\Users\Administrator\Desktop\OpenAI.url";
+
+        assert!(matches!(infer_target_type(path), TargetType::Shortcut));
+        assert!(matches!(
+            resolve_target(path.into()).unwrap().target_type,
+            TargetType::Shortcut
+        ));
+        assert_eq!(location_target_path(path).unwrap(), PathBuf::from(path));
+        assert!(matches!(
+            infer_target_type("https://openai.com"),
+            TargetType::Url
+        ));
+    }
+
+    #[test]
+    fn internet_shortcut_urls_are_read_from_ini_content() {
+        let unique = format!(
+            "quick-launcher-url-read-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("OpenAI.url");
+        fs::write(
+            &output,
+            "[InternetShortcut]\r\nIconIndex=0\r\nURL=https://openai.com/path\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_internet_shortcut_url(&output).unwrap(),
+            "https://openai.com/path"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn internet_shortcuts_accept_custom_uri_schemes() {
+        assert!(is_valid_internet_shortcut_url("steam://rungameid/123"));
+        assert!(is_valid_internet_shortcut_url("ms-settings:display"));
+        assert!(!is_valid_internet_shortcut_url(
+            "https://openai.com/path with spaces"
+        ));
+        assert!(!is_valid_internet_shortcut_url("openai.com"));
+        assert!(!is_valid_internet_shortcut_url("javascript:\nalert(1)"));
+    }
+
+    #[test]
+    fn external_internet_shortcuts_are_copied_without_removing_the_source() {
+        let unique = format!(
+            "quick-launcher-url-copy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        let source_directory = directory.join("desktop");
+        let destination_directory = directory.join("workspace");
+        fs::create_dir_all(&source_directory).unwrap();
+        fs::create_dir_all(&destination_directory).unwrap();
+        let source = source_directory.join("OpenAI.url");
+        fs::write(&source, "[InternetShortcut]\r\nURL=https://openai.com\r\n").unwrap();
+
+        let first =
+            copy_internet_shortcut_to_directory(&source, &destination_directory, "OpenAI").unwrap();
+        let second =
+            copy_internet_shortcut_to_directory(&source, &destination_directory, "OpenAI").unwrap();
+
+        assert!(source.exists());
+        assert_eq!(
+            fs::read_to_string(&first).unwrap(),
+            fs::read_to_string(&source).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(&second).unwrap(),
+            fs::read_to_string(&source).unwrap()
+        );
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("OpenAI.url")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("OpenAI (2).url")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn internet_shortcuts_are_written_as_url_files() {
         let unique = format!(
             "quick-launcher-url-test-{}-{}",
@@ -2466,6 +2673,7 @@ mod tests {
         );
         assert!(is_url_path("https://openai.com"));
         assert!(is_internet_shortcut_path("OpenAI.url"));
+        assert!(!is_internet_shortcut_path("https://openai.com/OpenAI.url"));
         fs::remove_dir_all(directory).unwrap();
     }
 }

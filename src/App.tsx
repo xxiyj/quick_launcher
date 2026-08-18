@@ -201,7 +201,9 @@ function normalizeData(data: LauncherData): LauncherData {
       kind: item.kind ?? "launcher",
       parentId: item.parentId ?? null,
       args: item.args ?? "",
-      targetType: item.targetType ?? "program",
+      targetType: (item.kind ?? "launcher") === "launcher" && isInternetShortcutPath(item.path)
+        ? "shortcut"
+        : item.targetType ?? "program",
       schedule: item.schedule ? normalizeLaunchSchedule(item.schedule) : undefined,
     })),
     settings: {
@@ -215,15 +217,19 @@ function normalizeData(data: LauncherData): LauncherData {
 function inferName(path: string) {
   const clean = path.replace(/[\\/]+$/, "");
   const file = clean.split(/[\\/]/).pop() ?? "";
-  return file.replace(/\.(exe|lnk|link)$/i, "") || "新启动项";
+  return file.replace(/\.(exe|lnk|link|url)$/i, "") || "新启动项";
 }
 
 function isShortcutPath(path: string) {
-  return /\.(lnk|link)$/i.test(path);
+  return !isUrlPath(path) && /\.(lnk|link|url)$/i.test(path.trim());
 }
 
 function isUrlPath(path: string) {
   return /^https?:\/\//i.test(path.trim());
+}
+
+function isInternetShortcutPath(path: string) {
+  return !isUrlPath(path) && /\.url$/i.test(path.trim());
 }
 
 function isImageIconPath(path: string) {
@@ -235,7 +241,8 @@ function isExtractableIconPath(path: string) {
 }
 
 function inferType(path: string): TargetType {
-  if (isUrlPath(path) || /\.url$/i.test(path.trim())) return "url";
+  if (isUrlPath(path)) return "url";
+  if (isInternetShortcutPath(path)) return "shortcut";
   if (isShortcutPath(path)) return "shortcut";
   if (/\.exe$/i.test(path)) return "program";
   return "folder";
