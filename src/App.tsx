@@ -325,6 +325,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const modalOpen = Boolean(draft || memoDraft || folderDraft || deleteConfirmation || settingsOpen || scheduleDraft);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const dropHandlerRef = useRef<((paths: string[]) => void) | null>(null);
   const lastSavedWindowSize = useRef<{ width: number; height: number } | undefined>(undefined);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -407,6 +408,7 @@ export default function App() {
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -419,15 +421,19 @@ export default function App() {
           return;
         }
         setDragActive(false);
-        if (event.payload.paths.length > 0) void addDroppedPaths(event.payload.paths);
+        if (event.payload.paths.length > 0) void dropHandlerRef.current?.(event.payload.paths);
       })
       .then((cleanup) => {
-        unlisten = cleanup;
+        if (disposed) cleanup();
+        else unlisten = cleanup;
       })
       .catch((error) => setStatus(`拖动监听失败：${String(error)}`));
 
-    return () => unlisten?.();
-  }, [categories, currentFolder, data.items, data.settings.defaultMemoCategoryId, selectedCategory]);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -786,6 +792,8 @@ export default function App() {
     // concurrently without any single failure aborting the others.
     void Promise.allSettled(additions.map((item) => hydrateItemFromPath(item.path, item.id)));
   }
+
+  dropHandlerRef.current = addDroppedPaths;
 
   function addCategory(name: string) {
     const trimmed = name.trim();
