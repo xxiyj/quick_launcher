@@ -1931,7 +1931,8 @@ fn open_program_in_explorer_native(target: &Path) -> Result<(), String> {
     if target.is_dir() {
         command.arg(target);
     } else {
-        command.arg(format!("/select,{}", target.to_string_lossy()));
+        // Explorer requires the selected path to be quoted when it contains spaces.
+        command.arg(format!("/select,\"{}\"", target.to_string_lossy()));
     }
     command.spawn().map_err(|error| error.to_string())?;
     Ok(())
