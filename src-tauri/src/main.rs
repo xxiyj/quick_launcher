@@ -6,6 +6,7 @@ use std::{
     ffi::{OsStr, OsString},
     mem::size_of,
     os::windows::ffi::{OsStrExt, OsStringExt},
+    os::windows::process::CommandExt,
 };
 use std::{
     fs,
@@ -1929,10 +1930,10 @@ fn open_program_in_explorer(path: String, shortcut_path: Option<String>) -> Resu
 fn open_program_in_explorer_native(target: &Path) -> Result<(), String> {
     let mut command = Command::new("explorer");
     if target.is_dir() {
-        command.arg(target);
+        command.raw_arg(format!("\"{}\"", target.to_string_lossy()));
     } else {
         // Explorer requires the selected path to be quoted when it contains spaces.
-        command.arg(format!("/select,\"{}\"", target.to_string_lossy()));
+        command.raw_arg(format!("/select,\"{}\"", target.to_string_lossy()));
     }
     command.spawn().map_err(|error| error.to_string())?;
     Ok(())
