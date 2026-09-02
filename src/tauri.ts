@@ -120,9 +120,9 @@ export async function launchTarget(path: string, args: string, targetType: Targe
   await invoke("launch_target", { path, args, targetType, shortcutPath });
 }
 
-export async function openProgramInExplorer(path: string): Promise<void> {
+export async function openProgramInExplorer(path: string, shortcutPath?: string): Promise<void> {
   if (!isTauri) return;
-  await invoke("open_program_in_explorer", { path });
+  await invoke("open_program_in_explorer", { path, shortcutPath });
 }
 
 export async function openProgramInTerminal(path: string): Promise<void> {

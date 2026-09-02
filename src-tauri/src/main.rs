@@ -1891,14 +1891,27 @@ fn directory_from_path(path: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "无法确定程序所在目录".into())
 }
 
-fn location_target_path(path: &str) -> Result<PathBuf, String> {
+fn location_target_path(path: &str, shortcut_path: Option<&str>) -> Result<PathBuf, String> {
     let path = sanitize_path(path);
     if path.trim().is_empty() || is_url_path(&path) {
         return Err("网址没有可打开的本地目录".into());
     }
+    let resolve_existing_shortcut = |candidate: &str| {
+        if !is_shortcut_path(candidate) {
+            return None;
+        }
+        resolve_shortcut_native(candidate)
+            .ok()
+            .map(|(resolved, _)| resolved)
+            .filter(|resolved| Path::new(resolved).exists())
+    };
     let target = if is_shortcut_path(&path) {
-        resolve_shortcut_native(&path)
-            .map(|(resolved_path, _)| resolved_path)
+        resolve_existing_shortcut(&path)
+            .or_else(|| shortcut_path.and_then(resolve_existing_shortcut))
+            .unwrap_or(path)
+    } else if !Path::new(&path).exists() {
+        shortcut_path
+            .and_then(resolve_existing_shortcut)
             .unwrap_or(path)
     } else {
         path
@@ -1907,8 +1920,8 @@ fn location_target_path(path: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn open_program_in_explorer(path: String) -> Result<(), String> {
-    let target = location_target_path(&path)?;
+fn open_program_in_explorer(path: String, shortcut_path: Option<String>) -> Result<(), String> {
+    let target = location_target_path(&path, shortcut_path.as_deref())?;
     open_program_in_explorer_native(&target)
 }
 
@@ -1935,7 +1948,7 @@ fn open_program_in_explorer_native(target: &Path) -> Result<(), String> {
 
 #[tauri::command]
 fn open_program_in_terminal(path: String) -> Result<(), String> {
-    let target = location_target_path(&path)?;
+    let target = location_target_path(&path, None)?;
     let directory = directory_from_path(&target)?;
     open_program_in_terminal_native(&directory)
 }
@@ -2576,7 +2589,10 @@ mod tests {
             resolve_target(path.into()).unwrap().target_type,
             TargetType::Shortcut
         ));
-        assert_eq!(location_target_path(path).unwrap(), PathBuf::from(path));
+        assert_eq!(
+            location_target_path(path, None).unwrap(),
+            PathBuf::from(path)
+        );
         assert!(matches!(
             infer_target_type("https://openai.com"),
             TargetType::Url

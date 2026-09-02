@@ -1271,7 +1271,7 @@ export default function App() {
 
   async function openProgramDirectory(item: LauncherItem, destination: "explorer" | "terminal") {
     try {
-      if (destination === "explorer") await openProgramInExplorer(item.path);
+      if (destination === "explorer") await openProgramInExplorer(item.path, item.shortcutPath);
       else await openProgramInTerminal(item.path);
       setStatus(destination === "explorer" ? `已在资源管理器中打开「${item.name}」所在目录` : `已在终端中打开「${item.name}」所在目录`);
     } catch (error) {
