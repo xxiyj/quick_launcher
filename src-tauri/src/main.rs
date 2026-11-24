@@ -97,7 +97,7 @@ enum ItemKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct LaunchSchedule {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_schedule_enabled")]
     enabled: bool,
     #[serde(default = "default_schedule_mode")]
     mode: ScheduleMode,
@@ -122,6 +122,10 @@ fn default_item_kind() -> ItemKind {
 
 fn default_schedule_mode() -> ScheduleMode {
     ScheduleMode::Interval
+}
+
+fn default_schedule_enabled() -> bool {
+    false
 }
 
 fn default_schedule_interval_minutes() -> u32 {
@@ -2382,6 +2386,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(schedule.weekdays, vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn schedule_without_enabled_flag_defaults_to_disabled() {
+        let schedule: LaunchSchedule = serde_json::from_value(serde_json::json!({
+            "mode": "interval",
+            "intervalMinutes": 30
+        }))
+        .unwrap();
+
+        assert!(!schedule.enabled);
     }
 
     #[test]

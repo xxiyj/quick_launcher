@@ -22,7 +22,7 @@ export function normalizeLaunchSchedule(schedule?: LaunchSchedule): LaunchSchedu
   const weekdays = [...new Set((schedule?.weekdays ?? WEEKDAYS.map((day) => day.value)).filter((day) => Number.isInteger(day) && day >= 1 && day <= 7))].sort((a, b) => a - b);
   const dailyTimes = [...new Set((schedule?.dailyTimes ?? []).filter(isValidScheduleTime))].sort();
   return {
-    enabled: schedule?.enabled ?? true,
+    enabled: schedule?.enabled ?? false,
     mode: schedule?.mode === "daily" ? "daily" : "interval",
     intervalMinutes,
     weekdays: weekdays.length ? weekdays : WEEKDAYS.map((day) => day.value),

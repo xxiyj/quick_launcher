@@ -23,8 +23,8 @@ export async function loadData(): Promise<DataEnvelope> {
     const fallback: LauncherData = {
       version: 2,
       categories: [
-        { id: "work", name: "工作", color: "#2f80ed", order: 0 },
-        { id: "tools", name: "工具", color: "#27ae60", order: 1 },
+        { id: "work", name: "Work", color: "#2f80ed", order: 0 },
+        { id: "tools", name: "Tools", color: "#27ae60", order: 1 },
       ],
       items: [],
       settings: {
@@ -37,6 +37,7 @@ export async function loadData(): Promise<DataEnvelope> {
         showCardMeta: true,
         launchMode: "single",
         theme: "light",
+        language: "en",
         defaultMemoCategoryId: "work",
       },
     };

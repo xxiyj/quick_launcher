@@ -54,6 +54,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import packageJson from "../package.json";
 import { useScheduler } from "./hooks/useScheduler";
 import { useWindowBehavior } from "./hooks/useWindowBehavior";
+import { Localized } from "./i18n";
 import { buildSearchKey, matchesSearch } from "./search";
 import { DEFAULT_DAILY_TIME, WEEKDAYS, isLauncher, isValidScheduleTime, localScheduleDay, localScheduleTime, localScheduleWeekday, normalizeLaunchSchedule } from "./utils";
 import {
@@ -84,7 +85,7 @@ import {
   updateHotkey,
   updateStartup,
 } from "./tauri";
-import type { Category, ItemDraft, LauncherData, LauncherItem, LaunchMode, LaunchSchedule, LaunchScheduleMode, TargetType, Theme, UpdateInfo } from "./types";
+import type { Category, ItemDraft, LauncherData, LauncherItem, Language, LaunchMode, LaunchSchedule, LaunchScheduleMode, TargetType, Theme, UpdateInfo } from "./types";
 
 const COLORS = ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0", "#00a3a3"];
 const APP_VERSION = packageJson.version.replace(/\.0$/, "");
@@ -168,7 +169,7 @@ function nextAvailableScheduleTime(times: string[]) {
 function defaultData(): LauncherData {
   return {
     version: 2,
-    categories: [{ id: "default", name: "常用", color: "#2f80ed", order: 0 }],
+    categories: [{ id: "default", name: "Common", color: "#2f80ed", order: 0 }],
     items: [],
     settings: {
       hotkey: DEFAULT_HOTKEY,
@@ -180,6 +181,7 @@ function defaultData(): LauncherData {
       showCardMeta: true,
       launchMode: "single",
       theme: "light",
+      language: "en",
       defaultMemoCategoryId: "default",
     },
   };
@@ -209,6 +211,7 @@ function normalizeData(data: LauncherData): LauncherData {
     settings: {
       ...defaults.settings,
       ...data.settings,
+      language: data.settings.language === "zh" ? "zh" : "en",
       defaultMemoCategoryId,
     },
   };
@@ -1300,11 +1303,18 @@ export default function App() {
     });
   }, [openFolderEditor, openMemo]);
 
-  function saveSchedule() {
+  async function saveSchedule(autoStart: boolean) {
     if (!scheduleDraft) return;
     const schedule = normalizeLaunchSchedule(scheduleDraft);
+    try {
+      if (autoStart !== data.settings.autoStart) await updateStartup(autoStart);
+    } catch (error) {
+      setStatus(`开机自动启动设置失败：${String(error)}`);
+      return;
+    }
     persist((current) => ({
       ...current,
+      settings: { ...current.settings, autoStart },
       items: current.items.map((item) =>
         item.id === scheduleDraft.itemId ? { ...item, schedule, updatedAt: new Date().toISOString() } : item,
       ),
@@ -1322,6 +1332,7 @@ export default function App() {
     autoSortByLaunchCount: boolean,
     showCardMeta: boolean,
     launchMode: LaunchMode,
+    language: Language,
   ) {
     try {
       const nextHotkey = hotkey.trim() || DEFAULT_HOTKEY;
@@ -1339,6 +1350,7 @@ export default function App() {
           autoSortByLaunchCount,
           showCardMeta,
           launchMode,
+          language,
         },
       }));
       setSettingsOpen(false);
@@ -1349,6 +1361,7 @@ export default function App() {
   }
 
   return (
+    <Localized language={data.settings.language ?? "en"}>
     <main className={`shell theme-${data.settings.theme} ${dragActive ? "dragging" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => event.preventDefault()}>
       <WindowTitlebar
         theme={data.settings.theme}
@@ -1504,6 +1517,7 @@ export default function App() {
           hotkey={data.settings.hotkey}
           launchMode={data.settings.launchMode}
           showCardMeta={data.settings.showCardMeta}
+          language={data.settings.language ?? "en"}
           onClose={() => setSettingsOpen(false)}
           onSubmit={saveSettings}
         />
@@ -1538,10 +1552,11 @@ export default function App() {
 
       {scheduleDraft ? (
         <ScheduleModal
+          autoStart={data.settings.autoStart}
           draft={scheduleDraft}
           onChange={setScheduleDraft}
           onClose={() => setScheduleDraft(null)}
-          onSubmit={saveSchedule}
+          onSubmit={(autoStart) => void saveSchedule(autoStart)}
         />
       ) : null}
 
@@ -1561,6 +1576,7 @@ export default function App() {
         </div>
       ) : null}
     </main>
+    </Localized>
   );
 }
 
@@ -2074,15 +2090,17 @@ function FolderModal({ categories, draft, onChange, onClose, onDelete, onSubmit 
 }
 
 interface ScheduleModalProps {
+  autoStart: boolean;
   draft: ScheduleDraft;
   onChange: (draft: ScheduleDraft) => void;
   onClose: () => void;
-  onSubmit: () => void;
+  onSubmit: (autoStart: boolean) => void;
 }
 
-function ScheduleModal({ draft, onChange, onClose, onSubmit }: ScheduleModalProps) {
+function ScheduleModal({ autoStart, draft, onChange, onClose, onSubmit }: ScheduleModalProps) {
   const dailyTimes = [...draft.dailyTimes].sort();
   const disabled = !draft.enabled;
+  const [nextAutoStart, setNextAutoStart] = useState(autoStart);
 
   function setMode(mode: LaunchScheduleMode) {
     onChange({
@@ -2116,6 +2134,7 @@ function ScheduleModal({ draft, onChange, onClose, onSubmit }: ScheduleModalProp
         <header><h2>定时启动</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="schedule-body">
           <label className="check-row"><input checked={draft.enabled} onChange={(event) => onChange({ ...draft, enabled: event.target.checked })} type="checkbox" />启用定时启动</label>
+          <label className="check-row"><input checked={nextAutoStart} onChange={(event) => setNextAutoStart(event.target.checked)} type="checkbox" />开机自动启动</label>
           <div className={`schedule-fields ${disabled ? "disabled" : ""}`}>
             <div className="schedule-field">
               <span>启动方式</span>
@@ -2162,7 +2181,7 @@ function ScheduleModal({ draft, onChange, onClose, onSubmit }: ScheduleModalProp
             )}
           </div>
         </div>
-        <footer><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={onSubmit} type="button">保存</button></div></footer>
+        <footer><div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextAutoStart)} type="button">保存</button></div></footer>
       </section>
     </div>
   );
@@ -2177,11 +2196,12 @@ interface SettingsModalProps {
   closeToTray: boolean;
   hotkey: string;
   launchMode: LaunchMode;
+  language: Language;
   onClose: () => void;
-  onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, autoHideAfterLaunch: boolean, autoHideOnBlur: boolean, autoSortByLaunchCount: boolean, showCardMeta: boolean, launchMode: LaunchMode) => void;
+  onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, autoHideAfterLaunch: boolean, autoHideOnBlur: boolean, autoSortByLaunchCount: boolean, showCardMeta: boolean, launchMode: LaunchMode, language: Language) => void;
 }
 
-function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, onClose, onSubmit, showCardMeta }: SettingsModalProps) {
+function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, language, onClose, onSubmit, showCardMeta }: SettingsModalProps) {
   const [nextHotkey, setNextHotkey] = useState(hotkey);
   const [nextCloseToTray, setNextCloseToTray] = useState(closeToTray);
   const [nextAutoStart, setNextAutoStart] = useState(autoStart);
@@ -2190,6 +2210,7 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
   const [nextAutoSortByLaunchCount, setNextAutoSortByLaunchCount] = useState(autoSortByLaunchCount);
   const [nextShowCardMeta, setNextShowCardMeta] = useState(showCardMeta);
   const [nextLaunchMode, setNextLaunchMode] = useState<LaunchMode>(launchMode);
+  const [nextLanguage, setNextLanguage] = useState<Language>(language);
   const [capturingHotkey, setCapturingHotkey] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
   const [updateError, setUpdateError] = useState("");
@@ -2261,8 +2282,9 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
   return (
     <div className="modal-backdrop">
       <section className="modal settings-modal">
-        <header><h2>设置</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
+        <header><h2>{nextLanguage === "en" ? "Settings" : "设置"}</h2><button onClick={onClose} title={nextLanguage === "en" ? "Close" : "关闭"} type="button"><X size={18} /></button></header>
         <div className="settings-body">
+          <label><span>{nextLanguage === "en" ? "Language" : "界面语言"}</span><select value={nextLanguage} onChange={(event) => setNextLanguage(event.target.value as Language)}><option value="en">English</option><option value="zh">简体中文</option></select></label>
           <label className="check-row"><input checked={nextAutoStart} onChange={(event) => setNextAutoStart(event.target.checked)} type="checkbox" />开机启动</label>
           <label className="check-row"><input checked={nextCloseToTray} onChange={(event) => setNextCloseToTray(event.target.checked)} type="checkbox" />关闭窗口时最小化到托盘</label>
           <label className="check-row"><input checked={nextAutoHideAfterLaunch} onChange={(event) => setNextAutoHideAfterLaunch(event.target.checked)} type="checkbox" />运行程序后自动关闭主窗口</label>
@@ -2290,7 +2312,7 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
               <span aria-live="polite">{updateLabel}</span>
             </button>
           </div>
-          <div className="footer-actions"><button className="ghost" onClick={onClose} type="button">取消</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || DEFAULT_HOTKEY, nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode)} type="button">保存</button></div>
+          <div className="footer-actions"><button className="ghost" onClick={onClose} type="button">{nextLanguage === "en" ? "Cancel" : "取消"}</button><button className="primary" onClick={() => onSubmit(nextHotkey.trim() || DEFAULT_HOTKEY, nextCloseToTray, nextAutoStart, nextAutoHideAfterLaunch, nextAutoHideOnBlur, nextAutoSortByLaunchCount, nextShowCardMeta, nextLaunchMode, nextLanguage)} type="button">{nextLanguage === "en" ? "Save" : "保存"}</button></div>
         </footer>
       </section>
     </div>

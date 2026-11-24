@@ -2,6 +2,7 @@ export type TargetType = "program" | "shortcut" | "folder" | "url";
 export type LaunchMode = "single" | "double";
 export type LaunchScheduleMode = "interval" | "daily";
 export type Theme = "light" | "dark";
+export type Language = "en" | "zh";
 export type ItemKind = "launcher" | "memo" | "workspaceFolder";
 
 export interface WindowSize {
@@ -53,6 +54,7 @@ export interface LauncherSettings {
   showCardMeta: boolean;
   launchMode: LaunchMode;
   theme: Theme;
+  language?: Language;
   defaultMemoCategoryId?: string;
   windowSize?: WindowSize;
 }
