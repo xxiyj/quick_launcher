@@ -141,6 +141,18 @@ export async function updateStartup(enabled: boolean): Promise<void> {
   await invoke("update_startup", { enabled });
 }
 
+export async function updateLauncherItemStartup(
+  itemId: string,
+  enabled: boolean,
+  path: string,
+  args: string,
+  targetType: TargetType,
+  shortcutPath?: string,
+): Promise<void> {
+  if (!isTauri) return;
+  await invoke("update_launcher_item_startup", { itemId, enabled, path, args, targetType, shortcutPath });
+}
+
 export async function saveWindowSize(width: number, height: number): Promise<void> {
   if (!isTauri) return;
   await invoke("save_window_size", { width, height });

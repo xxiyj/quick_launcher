@@ -28,6 +28,7 @@ export interface LauncherItem {
   parentId?: string | null;
   iconPath?: string;
   shortcutPath?: string;
+  autoStart?: boolean;
   schedule?: LaunchSchedule;
   searchKey: string;
   order: number;

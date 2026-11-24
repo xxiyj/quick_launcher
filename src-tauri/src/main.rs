@@ -77,6 +77,8 @@ struct LauncherItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shortcut_path: Option<String>,
     #[serde(default)]
+    auto_start: bool,
+    #[serde(default)]
     schedule: Option<LaunchSchedule>,
     search_key: String,
     order: u32,
@@ -365,6 +367,7 @@ fn main() {
             install_update,
             update_hotkey,
             update_startup,
+            update_launcher_item_startup,
             show_main_window,
             hide_main_window,
             reveal_data_dir,
@@ -2132,6 +2135,18 @@ fn update_startup(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn update_launcher_item_startup(
+    item_id: String,
+    enabled: bool,
+    path: String,
+    args: String,
+    target_type: TargetType,
+    shortcut_path: Option<String>,
+) -> Result<(), String> {
+    set_launcher_item_startup(&item_id, enabled, &path, &args, &target_type, shortcut_path.as_deref())
+}
+
+#[tauri::command]
 fn save_window_size(app: AppHandle, width: u32, height: u32) -> Result<(), String> {
     if width < 980 || height < 680 {
         return Ok(());
@@ -2199,6 +2214,83 @@ fn set_startup_enabled(enabled: bool) -> Result<(), String> {
                     "Delete startup registry value failed: {}",
                     delete_result.0
                 ))
+            }
+        };
+        let _ = RegCloseKey(key);
+        result
+    }
+}
+
+#[cfg(not(windows))]
+fn set_launcher_item_startup(
+    _item_id: &str,
+    _enabled: bool,
+    _path: &str,
+    _args: &str,
+    _target_type: &TargetType,
+    _shortcut_path: Option<&str>,
+) -> Result<(), String> {
+    Err("Per-item startup registration is only available on Windows".into())
+}
+
+#[cfg(windows)]
+fn set_launcher_item_startup(
+    item_id: &str,
+    enabled: bool,
+    path: &str,
+    args: &str,
+    _target_type: &TargetType,
+    shortcut_path: Option<&str>,
+) -> Result<(), String> {
+    let subkey = wide_path("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let value_name = wide_path(&format!("Quick Launcher Item {item_id}"));
+    let mut key = windows::Win32::System::Registry::HKEY::default();
+    unsafe {
+        let open_result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            Some(0),
+            KEY_SET_VALUE,
+            &mut key,
+        );
+        if open_result.0 != 0 {
+            return Err(format!("Open startup registry key failed: {}", open_result.0));
+        }
+
+        let result = if enabled {
+            let selected_path = if Path::new(path).exists() {
+                path
+            } else {
+                shortcut_path.unwrap_or(path)
+            };
+            let command = if args.trim().is_empty() {
+                format!("\"{}\"", selected_path)
+            } else {
+                format!("\"{}\" {}", selected_path, args)
+            };
+            let data = wide_path(&command);
+            let bytes = std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                data.len() * std::mem::size_of::<u16>(),
+            );
+            let set_result = RegSetValueExW(
+                key,
+                PCWSTR(value_name.as_ptr()),
+                Some(0),
+                REG_SZ,
+                Some(bytes),
+            );
+            if set_result.0 == 0 {
+                Ok(())
+            } else {
+                Err(format!("Set launcher startup value failed: {}", set_result.0))
+            }
+        } else {
+            let delete_result = RegDeleteValueW(key, PCWSTR(value_name.as_ptr()));
+            if delete_result.0 == 0 || delete_result.0 == 2 {
+                Ok(())
+            } else {
+                Err(format!("Delete launcher startup value failed: {}", delete_result.0))
             }
         };
         let _ = RegCloseKey(key);

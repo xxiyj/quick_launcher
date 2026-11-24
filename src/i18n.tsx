@@ -1,4 +1,4 @@
-import React, { type ReactNode } from "react";
+import React, { type ReactNode, useEffect } from "react";
 import type { Language } from "./types";
 
 const en: Record<string, string> = {
@@ -100,5 +100,37 @@ function localizeNode(node: ReactNode, language: Language): ReactNode {
 }
 
 export function Localized({ language, children }: { language: Language; children: ReactNode }) {
+  useEffect(() => {
+    const root = document.querySelector<HTMLElement>(".shell");
+    if (!root) return;
+    root.lang = language === "en" ? "en" : "zh-CN";
+
+    const translateDom = () => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let textNode: Node | null;
+      while ((textNode = walker.nextNode())) {
+        const value = textNode.nodeValue;
+        if (value) {
+          const translated = translateString(value, language);
+          if (translated !== value) textNode.nodeValue = translated;
+        }
+      }
+      for (const element of root.querySelectorAll<HTMLElement>("[title], [placeholder], [aria-label]")) {
+        for (const attribute of ["title", "placeholder", "aria-label"]) {
+          const value = element.getAttribute(attribute);
+          if (value) {
+            const translated = translateString(value, language);
+            if (translated !== value) element.setAttribute(attribute, translated);
+          }
+        }
+      }
+    };
+
+    translateDom();
+    const observer = new MutationObserver(translateDom);
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
+    return () => observer.disconnect();
+  }, [language]);
+
   return <>{localizeNode(children, language)}</>;
 }

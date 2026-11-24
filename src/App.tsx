@@ -83,6 +83,7 @@ import {
   saveWindowSize,
   storeIcon,
   updateHotkey,
+  updateLauncherItemStartup,
   updateStartup,
 } from "./tauri";
 import type { Category, ItemDraft, LauncherData, LauncherItem, Language, LaunchMode, LaunchSchedule, LaunchScheduleMode, TargetType, Theme, UpdateInfo } from "./types";
@@ -201,6 +202,7 @@ function normalizeData(data: LauncherData): LauncherData {
     items: data.items.map((item) => ({
       ...item,
       kind: item.kind ?? "launcher",
+      autoStart: item.autoStart ?? false,
       parentId: item.parentId ?? null,
       args: item.args ?? "",
       targetType: (item.kind ?? "launcher") === "launcher" && isInternetShortcutPath(item.path)
@@ -323,6 +325,7 @@ export default function App() {
   const [createMenu, setCreateMenu] = useState<CreateMenuState | null>(null);
   const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [languagePreview, setLanguagePreview] = useState<Language | null>(null);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -1028,12 +1031,23 @@ export default function App() {
       parentId,
       iconPath,
       shortcutPath,
+      autoStart: existing?.autoStart ?? false,
       searchKey: buildSearchKey(draft.name, `${path} ${args}`),
       order: existing?.order ?? data.items.length,
       launchCount: existing?.launchCount ?? 0,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
+    if (item.autoStart && existing && (
+      item.path !== existing.path || item.args !== existing.args || item.targetType !== existing.targetType || item.shortcutPath !== existing.shortcutPath
+    )) {
+      try {
+        await updateLauncherItemStartup(item.id, true, item.path, item.args ?? "", item.targetType ?? "program", item.shortcutPath);
+      } catch (error) {
+        setStatus(`更新开机启动目标失败：${String(error)}`);
+        return;
+      }
+    }
     persist((current) => ({
       ...current,
       items: current.items.some((value) => value.id === item.id)
@@ -1205,6 +1219,9 @@ export default function App() {
           .flatMap((node) => [node.path, node.shortcutPath])
           .filter((path): path is string => Boolean(path)),
       )];
+      for (const node of data.items.filter((entry) => removedIds.has(entry.id) && entry.kind === "launcher" && entry.autoStart)) {
+        await updateLauncherItemStartup(node.id, false, node.path, node.args ?? "", node.targetType ?? "program", node.shortcutPath);
+      }
       for (const path of managedPaths) await recycleWorkspacePath(path);
       persist((current) => ({ ...current, items: current.items.filter((node) => !removedIds.has(node.id)) }));
       if (currentFolderId && removedIds.has(currentFolderId)) setCurrentFolderId(null);
@@ -1306,17 +1323,20 @@ export default function App() {
   async function saveSchedule(autoStart: boolean) {
     if (!scheduleDraft) return;
     const schedule = normalizeLaunchSchedule(scheduleDraft);
+    const scheduledItem = data.items.find((item) => item.id === scheduleDraft.itemId);
+    if (!scheduledItem) return;
     try {
-      if (autoStart !== data.settings.autoStart) await updateStartup(autoStart);
+      if (autoStart !== Boolean(scheduledItem.autoStart)) {
+        await updateLauncherItemStartup(scheduledItem.id, autoStart, scheduledItem.path, scheduledItem.args ?? "", scheduledItem.targetType ?? "program", scheduledItem.shortcutPath);
+      }
     } catch (error) {
       setStatus(`开机自动启动设置失败：${String(error)}`);
       return;
     }
     persist((current) => ({
       ...current,
-      settings: { ...current.settings, autoStart },
       items: current.items.map((item) =>
-        item.id === scheduleDraft.itemId ? { ...item, schedule, updatedAt: new Date().toISOString() } : item,
+        item.id === scheduleDraft.itemId ? { ...item, schedule, autoStart, updatedAt: new Date().toISOString() } : item,
       ),
     }));
     setScheduleDraft(null);
@@ -1354,6 +1374,7 @@ export default function App() {
         },
       }));
       setSettingsOpen(false);
+      setLanguagePreview(null);
       setStatus("设置已更新");
     } catch (error) {
       setStatus(`设置保存失败：${String(error)}`);
@@ -1361,7 +1382,7 @@ export default function App() {
   }
 
   return (
-    <Localized language={data.settings.language ?? "en"}>
+    <Localized language={languagePreview ?? data.settings.language ?? "en"}>
     <main className={`shell theme-${data.settings.theme} ${dragActive ? "dragging" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => event.preventDefault()}>
       <WindowTitlebar
         theme={data.settings.theme}
@@ -1378,7 +1399,10 @@ export default function App() {
             categoryCounts={categoryCounts}
             onAddCategory={addCategory}
             onDeleteCategory={requestDeleteCategory}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={() => {
+              setLanguagePreview(data.settings.language ?? "en");
+              setSettingsOpen(true);
+            }}
             onRenameCategory={renameCategory}
             onReorderCategory={reorderCategories}
             onSelectAll={() => selectCategory("all")}
@@ -1517,8 +1541,9 @@ export default function App() {
           hotkey={data.settings.hotkey}
           launchMode={data.settings.launchMode}
           showCardMeta={data.settings.showCardMeta}
-          language={data.settings.language ?? "en"}
-          onClose={() => setSettingsOpen(false)}
+          language={languagePreview ?? data.settings.language ?? "en"}
+          onLanguageChange={setLanguagePreview}
+          onClose={() => { setLanguagePreview(null); setSettingsOpen(false); }}
           onSubmit={saveSettings}
         />
       ) : null}
@@ -1552,7 +1577,7 @@ export default function App() {
 
       {scheduleDraft ? (
         <ScheduleModal
-          autoStart={data.settings.autoStart}
+          autoStart={Boolean(data.items.find((item) => item.id === scheduleDraft.itemId)?.autoStart)}
           draft={scheduleDraft}
           onChange={setScheduleDraft}
           onClose={() => setScheduleDraft(null)}
@@ -2197,11 +2222,12 @@ interface SettingsModalProps {
   hotkey: string;
   launchMode: LaunchMode;
   language: Language;
+  onLanguageChange: (language: Language) => void;
   onClose: () => void;
   onSubmit: (hotkey: string, closeToTray: boolean, autoStart: boolean, autoHideAfterLaunch: boolean, autoHideOnBlur: boolean, autoSortByLaunchCount: boolean, showCardMeta: boolean, launchMode: LaunchMode, language: Language) => void;
 }
 
-function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, language, onClose, onSubmit, showCardMeta }: SettingsModalProps) {
+function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSortByLaunchCount, closeToTray, hotkey, launchMode, language, onLanguageChange, onClose, onSubmit, showCardMeta }: SettingsModalProps) {
   const [nextHotkey, setNextHotkey] = useState(hotkey);
   const [nextCloseToTray, setNextCloseToTray] = useState(closeToTray);
   const [nextAutoStart, setNextAutoStart] = useState(autoStart);
@@ -2284,7 +2310,7 @@ function SettingsModal({ autoStart, autoHideAfterLaunch, autoHideOnBlur, autoSor
       <section className="modal settings-modal">
         <header><h2>{nextLanguage === "en" ? "Settings" : "设置"}</h2><button onClick={onClose} title={nextLanguage === "en" ? "Close" : "关闭"} type="button"><X size={18} /></button></header>
         <div className="settings-body">
-          <label><span>{nextLanguage === "en" ? "Language" : "界面语言"}</span><select value={nextLanguage} onChange={(event) => setNextLanguage(event.target.value as Language)}><option value="en">English</option><option value="zh">简体中文</option></select></label>
+          <label><span>{nextLanguage === "en" ? "Language" : "界面语言"}</span><select value={nextLanguage} onChange={(event) => { const language = event.target.value as Language; setNextLanguage(language); onLanguageChange(language); }}><option value="en">English</option><option value="zh">简体中文</option></select></label>
           <label className="check-row"><input checked={nextAutoStart} onChange={(event) => setNextAutoStart(event.target.checked)} type="checkbox" />开机启动</label>
           <label className="check-row"><input checked={nextCloseToTray} onChange={(event) => setNextCloseToTray(event.target.checked)} type="checkbox" />关闭窗口时最小化到托盘</label>
           <label className="check-row"><input checked={nextAutoHideAfterLaunch} onChange={(event) => setNextAutoHideAfterLaunch(event.target.checked)} type="checkbox" />运行程序后自动关闭主窗口</label>
