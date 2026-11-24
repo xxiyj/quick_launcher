@@ -2133,8 +2133,8 @@ function ScheduleModal({ autoStart, draft, onChange, onClose, onSubmit }: Schedu
       <section aria-modal="true" className="modal schedule-modal" role="dialog">
         <header><h2>定时启动</h2><button onClick={onClose} title="关闭" type="button"><X size={18} /></button></header>
         <div className="schedule-body">
-          <label className="check-row"><input checked={draft.enabled} onChange={(event) => onChange({ ...draft, enabled: event.target.checked })} type="checkbox" />启用定时启动</label>
           <label className="check-row"><input checked={nextAutoStart} onChange={(event) => setNextAutoStart(event.target.checked)} type="checkbox" />开机自动启动</label>
+          <label className="check-row"><input checked={draft.enabled} onChange={(event) => onChange({ ...draft, enabled: event.target.checked })} type="checkbox" />启用定时启动</label>
           <div className={`schedule-fields ${disabled ? "disabled" : ""}`}>
             <div className="schedule-field">
               <span>启动方式</span>
